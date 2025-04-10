@@ -29,16 +29,7 @@ dependencies = [
     "mcp>=1.6.0",
     "sentence-transformers>=3.4.1",
     "accelerate>=1.6.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-xdist>=3.5.0",
-    "ruff>=0.3.0",
-    "testcontainers>=3.7.0",
-    "pre-commit>=3.6.0",
+    "redisvl>=0.5.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -112,6 +103,16 @@ ban-relative-imports = "all"
 quote-style = "double"
 # Use spaces for indentation
 indent-style = "space"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.23.0",
+    "pytest-xdist>=3.5.0",
+    "ruff>=0.3.0",
+    "testcontainers>=3.7.0",
+    "pre-commit>=3.6.0",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]

@@ -162,13 +162,10 @@ async def create_long_term_memory(
 @router.post("/long-term-memory/search", response_model=LongTermMemoryResultsResponse)
 async def search_long_term_memory(payload: SearchPayload):
     """
-    Run a semantic search on long-term memory
-
-    TODO: Infer topics, entities for `text` and attempt to use them
-          as boosts or filters in the search.
+    Run a semantic search on long-term memory with filtering options.
 
     Args:
-        payload: Search payload
+        payload: Search payload with filter objects for precise queries
 
     Returns:
         List of search results
@@ -178,7 +175,15 @@ async def search_long_term_memory(payload: SearchPayload):
     if not settings.long_term_memory:
         raise HTTPException(status_code=400, detail="Long-term memory is disabled")
 
+    # Extract filter objects from the payload
+    filters = payload.get_filters()
+
+    # Pass text, redis, and filter objects to the search function
     return await long_term_memory.search_long_term_memories(
         redis=redis,
-        **payload.model_dump(exclude_none=True),
+        text=payload.text,
+        distance_threshold=payload.distance_threshold,
+        limit=payload.limit,
+        offset=payload.offset,
+        **filters,
     )

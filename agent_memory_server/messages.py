@@ -16,12 +16,10 @@ from agent_memory_server.models import (
 from agent_memory_server.summarization import summarize_session
 from agent_memory_server.utils import (
     Keys,
-    TokenEscaper,
 )
 
 
 logger = logging.getLogger(__name__)
-escaper = TokenEscaper()
 
 
 async def list_sessions(

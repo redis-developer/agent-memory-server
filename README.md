@@ -23,11 +23,17 @@ A Redis-powered memory server built for AI agents and applications. It manages b
 ## System Diagram
 ![System Diagram](diagram.png)
 
-## Roadmap
-- Long-term memory deduplication
+## Project Status and Roadmap
+### Project Status: In Development, Pre-Release
+
+This project is under active development and is **pre-release** software. Think of it as an early beta!
+
+### Roadmap
+- Long-term memory deduplication and compaction
 - Configurable strategy for moving session memory to long-term memory
-- Auth hooks
+- Authentication/authorization hooks
 - Use a background task system instead of `BackgroundTask`
+- Separate Redis connections for long-term and short-term memory
 
 ## REST API Endpoints
 

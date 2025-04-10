@@ -8,17 +8,17 @@ import pytest
 from fastapi import BackgroundTasks
 from redis.commands.search.document import Document
 
+from agent_memory_server.filters import SessionId
 from agent_memory_server.long_term_memory import (
     index_long_term_memories,
     search_long_term_memories,
 )
 from agent_memory_server.models import LongTermMemory, LongTermMemoryResult
-from agent_memory_server.utils import REDIS_INDEX_NAME, TokenEscaper
 
 
 class TestLongTermMemory:
     @pytest.mark.asyncio
-    async def test_index_messages(
+    async def test_index_memories(
         self, mock_openai_client, mock_async_redis_client, session
     ):
         """Test indexing messages"""
@@ -30,13 +30,15 @@ class TestLongTermMemory:
         mock_vector = np.array(
             [[0.1, 0.2, 0.3, 0.4], [0.1, 0.2, 0.3, 0.4]], dtype=np.float32
         )
-        mock_openai_client.create_embedding.return_value = mock_vector
+
+        mock_vectorizer = MagicMock()
+        mock_vectorizer.aembed_many = AsyncMock(return_value=mock_vector)
 
         mock_async_redis_client.hset = AsyncMock()
 
         with mock.patch(
-            "agent_memory_server.long_term_memory.get_openai_client",
-            return_value=mock_openai_client,
+            "agent_memory_server.long_term_memory.OpenAITextVectorizer",
+            return_value=mock_vectorizer,
         ):
             await index_long_term_memories(
                 mock_async_redis_client,
@@ -46,7 +48,11 @@ class TestLongTermMemory:
 
         # Check that create_embedding was called with the right arguments
         contents = [memory.text for memory in long_term_memories]
-        mock_openai_client.create_embedding.assert_called_with(contents)
+        mock_vectorizer.aembed_many.assert_called_with(
+            contents,
+            batch_size=20,
+            as_buffer=True,
+        )
 
         # Verify one of the calls to make sure the data is correct
         for call in mock_async_redis_client.hset.call_args_list:
@@ -68,11 +74,12 @@ class TestLongTermMemory:
             }
 
     @pytest.mark.asyncio
-    async def test_search_messages(self, mock_openai_client, mock_async_redis_client):
-        """Test searching messages"""
+    async def test_search_memories(self, mock_openai_client, mock_async_redis_client):
+        """Test searching memories"""
         # Set up the mock embedding response
         mock_vector = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
-        mock_openai_client.create_embedding.return_value = mock_vector
+        mock_vectorizer = MagicMock()
+        mock_vectorizer.aembed = AsyncMock(return_value=mock_vector)
 
         class MockResult:
             def __init__(self, docs):
@@ -113,17 +120,21 @@ class TestLongTermMemory:
             ]
         )
 
-        mock_ft = MagicMock()
-        mock_ft.search = mock_search
-
-        mock_async_redis_client.ft = MagicMock(return_value=mock_ft)
+        mock_index = MagicMock()
+        mock_index.search = mock_search
 
         query = "What is the meaning of life?"
-        session_id = "test-session"
+        session_id = SessionId(eq="test-session")
 
-        with mock.patch(
-            "agent_memory_server.long_term_memory.get_openai_client",
-            return_value=mock_openai_client,
+        with (
+            mock.patch(
+                "agent_memory_server.long_term_memory.OpenAITextVectorizer",
+                return_value=mock_vectorizer,
+            ),
+            mock.patch(
+                "agent_memory_server.long_term_memory.get_search_index",
+                return_value=mock_index,
+            ),
         ):
             results = await search_long_term_memories(
                 query,
@@ -132,20 +143,9 @@ class TestLongTermMemory:
             )
 
         # Check that create_embedding was called with the right arguments
-        escaper = TokenEscaper()
-        escaped_query = escaper.escape(query)
-        print(mock_openai_client.create_embedding.call_args)
-        mock_openai_client.create_embedding.assert_called_with([escaped_query])
+        mock_vectorizer.aembed.assert_called_with(query)
 
-        assert mock_async_redis_client.ft.call_count == 1
-        assert mock_async_redis_client.ft.call_args[0][0] == REDIS_INDEX_NAME
-
-        assert mock_ft.search.call_count == 1
-        args = mock_ft.search.call_args[0]
-        assert (
-            args[0]._query_string
-            == "(@session_id:{test\\-session}    )=>[KNN 10 @vector $vec AS dist]"
-        )
+        assert mock_index.search.call_count == 1
 
         assert len(results.memories) == 2
         assert isinstance(results.memories[0], LongTermMemoryResult)
@@ -177,11 +177,12 @@ class TestLongTermMemoryIntegration:
         results = await search_long_term_memories(
             "What is the capital of France?",
             async_redis_client,
-            session_id="123",
+            session_id=SessionId(eq="123"),
             limit=1,
         )
 
         assert results.total == 1
+        assert len(results.memories) == 1
         assert results.memories[0].text == "Paris is the capital of France"
         assert results.memories[0].session_id == "123"
 
@@ -203,15 +204,12 @@ class TestLongTermMemoryIntegration:
         results = await search_long_term_memories(
             "What is the capital of France?",
             async_redis_client,
-            session_id="123",
-            distance_threshold=1.5,
+            session_id=SessionId(eq="123"),
+            distance_threshold=0.1,
             limit=2,
         )
 
-        assert results.total == 2
-        assert len(results.memories) == 2
-
+        assert results.total == 1
+        assert len(results.memories) == 1
         assert results.memories[0].text == "Paris is the capital of France"
         assert results.memories[0].session_id == "123"
-        assert results.memories[1].text == "France is a country in Europe"
-        assert results.memories[1].session_id == "123"

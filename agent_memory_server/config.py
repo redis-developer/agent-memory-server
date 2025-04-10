@@ -24,5 +24,11 @@ class Settings(BaseSettings):
     enable_topic_extraction: bool = True
     enable_ner: bool = True
 
+    # RedisVL Settings
+    redisvl_distance_metric: str = "COSINE"
+    redisvl_vector_dimensions: int = 1536
+    redisvl_index_name: str = "memory"
+    redisvl_index_prefix: str = "memory"
+
 
 settings = Settings()

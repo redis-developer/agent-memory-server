@@ -13,6 +13,7 @@ from redis.asyncio import ConnectionPool, Redis as AsyncRedis
 from testcontainers.compose import DockerCompose
 
 from agent_memory_server.api import router as memory_router
+from agent_memory_server.config import settings
 from agent_memory_server.healthcheck import router as health_router
 from agent_memory_server.llms import OpenAIClientWrapper
 from agent_memory_server.messages import (
@@ -22,7 +23,6 @@ from agent_memory_server.messages import (
 )
 from agent_memory_server.models import LongTermMemory, SessionMemory
 from agent_memory_server.utils import (
-    REDIS_INDEX_NAME,
     ensure_redisearch_index,
 )
 
@@ -68,21 +68,19 @@ async def search_index(async_redis_client):
 
     await async_redis_client.flushdb()
 
-    vector_dimensions = 1536
-    distance_metric = "COSINE"
-    index_name = REDIS_INDEX_NAME
-
     try:
         try:
-            await async_redis_client.execute_command("FT.INFO", index_name)
-            await async_redis_client.execute_command("FT.DROPINDEX", index_name)
+            await async_redis_client.execute_command(
+                "FT.INFO", settings.redisvl_index_name
+            )
+            await async_redis_client.execute_command(
+                "FT.DROPINDEX", settings.redisvl_index_name
+            )
         except Exception as e:
             if "unknown index name".lower() not in str(e).lower():
                 print(f"Error checking index: {e}")
 
-        await ensure_redisearch_index(
-            async_redis_client, vector_dimensions, distance_metric, index_name
-        )
+        await ensure_redisearch_index(async_redis_client)
 
     except Exception as e:
         print(f"ERROR: Failed to create RediSearch index: {str(e)}")
@@ -95,7 +93,9 @@ async def search_index(async_redis_client):
     # Clean up after tests
     await async_redis_client.flushdb()
     with contextlib.suppress(Exception):
-        await async_redis_client.execute_command("FT.DROPINDEX", index_name)
+        await async_redis_client.execute_command(
+            "FT.DROPINDEX", settings.redisvl_index_name
+        )
 
 
 @pytest.fixture()

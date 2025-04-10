@@ -1,16 +1,12 @@
 import logging
-import re
+from typing import Any
 
 from redis.asyncio import ConnectionPool, Redis
-from redis.commands.search.field import (
-    NumericField,
-    TagField,
-    TextField,
-    VectorField,
-)
-from redis.commands.search.indexDefinition import IndexDefinition, IndexType
-from regex import Pattern
+from redis.commands.search.document import Document
+from redisvl.index import AsyncSearchIndex
+from redisvl.schema import IndexSchema
 
+# Replace previous class with a redisvl imported symbol
 from agent_memory_server.config import settings
 from agent_memory_server.llms import (
     AnthropicClientWrapper,
@@ -19,13 +15,54 @@ from agent_memory_server.llms import (
 )
 
 
-REDIS_INDEX_NAME = "memory"
-
 logger = logging.getLogger(__name__)
 _redis_pool = None
 _openai_client = None
 _anthropic_client = None
 _model_clients = {}  # TODO: Use WeakRefDict
+_index = None
+
+
+def get_search_index(
+    redis: Redis,
+    index_name: str = settings.redisvl_index_name,
+    vector_dimensions: int = settings.redisvl_vector_dimensions,
+    distance_metric: str = settings.redisvl_distance_metric,
+) -> AsyncSearchIndex:
+    global _index
+    if _index is None:
+        schema = {
+            "index": {
+                "name": index_name,
+                "prefix": f"{index_name}:",
+                "key_separator": ":",
+                "storage_type": "hash",
+            },
+            "fields": [
+                {"name": "text", "type": "text"},
+                {"name": "id_", "type": "tag"},
+                {"name": "session_id", "type": "tag"},
+                {"name": "user_id", "type": "tag"},
+                {"name": "namespace", "type": "tag"},
+                {"name": "topics", "type": "tag"},
+                {"name": "entities", "type": "tag"},
+                {"name": "created_at", "type": "numeric"},
+                {"name": "last_accessed", "type": "numeric"},
+                {
+                    "name": "vector",
+                    "type": "vector",
+                    "attrs": {
+                        "algorithm": "HNSW",
+                        "dims": vector_dimensions,
+                        "distance_metric": distance_metric,
+                        "datatype": "float32",
+                    },
+                },
+            ],
+        }
+        index_schema = IndexSchema.from_dict(schema)
+        _index = AsyncSearchIndex(index_schema, redis_client=redis)
+    return _index
 
 
 def get_redis_conn(url: str | None = settings.redis_url, **kwargs) -> Redis:
@@ -41,66 +78,31 @@ def get_redis_conn(url: str | None = settings.redis_url, **kwargs) -> Redis:
 
 async def ensure_redisearch_index(
     redis: Redis,
-    vector_dimensions: int,
-    distance_metric: str = "COSINE",
-    index_name: str = REDIS_INDEX_NAME,
+    index_name: str = settings.redisvl_index_name,
+    vector_dimensions: int = settings.redisvl_vector_dimensions,
+    distance_metric: str = settings.redisvl_distance_metric,
 ) -> None:
     """
-    Ensure that the RediSearch index exists, create it if it doesn't.
-
-    TODO: Replace with RedisVL index.
+    Ensure that the async search index exists, create it if it doesn't.
+    Uses RedisVL's AsyncSearchIndex.
 
     Args:
+        redis: A Redis client instance
         vector_dimensions: Dimensions of the embedding vectors
         distance_metric: Distance metric to use (default: COSINE)
+        index_name: The name of the index
     """
-    try:
-        # Check if index exists
-        try:
-            await redis.ft(index_name).info()
-            logger.info("RediSearch index already exists")
-            return
-        except Exception as e:
-            # If error contains "unknown: index name", then index doesn't exist
-            if "unknown index name" in str(e).lower():
-                logger.info("RediSearch index doesn't exist, creating...")
+    index = get_search_index(redis, index_name, vector_dimensions, distance_metric)
+    if await index.exists():
+        logger.info("Async search index already exists")
+        return
 
-                schema = [
-                    TextField(name="text"),
-                    TagField(name="id_"),
-                    TagField(name="session_id"),
-                    TagField(name="user_id"),
-                    TagField(name="namespace"),
-                    TagField(name="topics", separator=","),
-                    TagField(name="entities", separator=","),
-                    NumericField(name="created_at"),
-                    NumericField(name="last_accessed"),
-                    VectorField(
-                        name="vector",
-                        algorithm="HNSW",
-                        attributes={
-                            "TYPE": "FLOAT32",
-                            "DIM": vector_dimensions,
-                            "DISTANCE_METRIC": distance_metric,
-                        },
-                    ),
-                ]
-                index_def = IndexDefinition(
-                    prefix=[f"{index_name}:"], index_type=IndexType.HASH
-                )
-                await redis.ft(index_name).create_index(
-                    fields=schema,
-                    definition=index_def,
-                )
-                logger.info(
-                    f"Created RediSearch index with {vector_dimensions} dimensions and {distance_metric} metric"
-                )
-                return
-            # This is an unexpected error
-            raise
-    except Exception as e:
-        logger.error(f"Error ensuring RediSearch index: {e}")
-        raise
+    logger.info("Async search index doesn't exist, creating...")
+    await index.create()
+
+    logger.info(
+        f"Created async search index with {vector_dimensions} dimensions and {distance_metric} metric"
+    )
 
 
 async def get_openai_client(**kwargs) -> OpenAIClientWrapper:
@@ -109,6 +111,16 @@ async def get_openai_client(**kwargs) -> OpenAIClientWrapper:
     if _openai_client is None:
         _openai_client = OpenAIClientWrapper(api_key=settings.openai_api_key, **kwargs)
     return _openai_client
+
+
+async def get_anthropic_client(**kwargs) -> AnthropicClientWrapper:
+    """Get Anthropic client (legacy function, use get_model_client instead)"""
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = AnthropicClientWrapper(
+            api_key=settings.anthropic_api_key, **kwargs
+        )
+    return _anthropic_client
 
 
 async def get_model_client(
@@ -165,30 +177,9 @@ class Keys:
         )
 
 
-class TokenEscaper:
-    """Escape punctuation within an input string.
-
-    Adapted from RedisOM Python.
-    """
-
-    # Characters that RediSearch requires us to escape during queries.
-    # Source: https://redis.io/docs/stack/search/reference/escaping/#the-rules-of-text-field-tokenization
-    DEFAULT_ESCAPED_CHARS = r"[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]"
-
-    def __init__(self, escape_chars_re: Pattern | None = None):
-        if escape_chars_re:
-            self.escaped_chars_re = escape_chars_re
-        else:
-            self.escaped_chars_re = re.compile(self.DEFAULT_ESCAPED_CHARS)
-
-    def escape(self, value: str) -> str:
-        if not isinstance(value, str):
-            raise TypeError(
-                f"Value must be a string object for token escaping, got type {type(value)}"
-            )
-
-        def escape_symbol(match):
-            value = match.group(0)
-            return f"\\{value}"
-
-        return self.escaped_chars_re.sub(escape_symbol, value)
+def safe_get(doc: Document, key: str, default: Any | None = None) -> Any:
+    """Get a value from a Document, returning a default if the key is not present"""
+    try:
+        return getattr(doc, key)
+    except AttributeError:
+        return default
