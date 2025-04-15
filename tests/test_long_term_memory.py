@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock
 import nanoid
 import numpy as np
 import pytest
-from fastapi import BackgroundTasks
 from redis.commands.search.document import Document
 
 from agent_memory_server.filters import SessionId
@@ -27,12 +26,14 @@ class TestLongTermMemory:
             LongTermMemory(text="France is a country in Europe", session_id=session),
         ]
 
-        mock_vector = np.array(
-            [[0.1, 0.2, 0.3, 0.4], [0.1, 0.2, 0.3, 0.4]], dtype=np.float32
-        )
+        # Create two separate embedding vectors
+        mock_vectors = [
+            np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32).tobytes(),
+            np.array([0.5, 0.6, 0.7, 0.8], dtype=np.float32).tobytes(),
+        ]
 
         mock_vectorizer = MagicMock()
-        mock_vectorizer.aembed_many = AsyncMock(return_value=mock_vector)
+        mock_vectorizer.aembed_many = AsyncMock(return_value=mock_vectors)
 
         mock_async_redis_client.hset = AsyncMock()
 
@@ -41,9 +42,7 @@ class TestLongTermMemory:
             return_value=mock_vectorizer,
         ):
             await index_long_term_memories(
-                mock_async_redis_client,
                 long_term_memories,
-                background_tasks=BackgroundTasks(),
             )
 
         # Check that create_embedding was called with the right arguments
@@ -55,7 +54,7 @@ class TestLongTermMemory:
         )
 
         # Verify one of the calls to make sure the data is correct
-        for call in mock_async_redis_client.hset.call_args_list:
+        for i, call in enumerate(mock_async_redis_client.hset.call_args_list):
             args, kwargs = call
 
             # Check that the key starts with the memory key prefix
@@ -64,13 +63,13 @@ class TestLongTermMemory:
             # Check that the mapping contains the right keys
             mapping = kwargs["mapping"]
             assert mapping == {
-                "text": long_term_memories[0].text,
-                "id_": long_term_memories[0].id_,
-                "session_id": long_term_memories[0].session_id,
-                "user_id": long_term_memories[0].user_id,
-                "last_accessed": long_term_memories[0].last_accessed,
-                "created_at": long_term_memories[0].created_at,
-                "vector": mock_vector.tobytes(),
+                "text": long_term_memories[i].text,
+                "id_": long_term_memories[i].id_,
+                "session_id": long_term_memories[i].session_id,
+                "user_id": long_term_memories[i].user_id,
+                "last_accessed": long_term_memories[i].last_accessed,
+                "created_at": long_term_memories[i].created_at,
+                "vector": mock_vectors[i],
             }
 
     @pytest.mark.asyncio
@@ -168,11 +167,13 @@ class TestLongTermMemoryIntegration:
             LongTermMemory(text="France is a country in Europe", session_id="123"),
         ]
 
-        await index_long_term_memories(
-            async_redis_client,
-            long_term_memories,
-            background_tasks=BackgroundTasks(),
-        )
+        with mock.patch(
+            "agent_memory_server.long_term_memory.get_redis_conn",
+            return_value=async_redis_client,
+        ):
+            await index_long_term_memories(
+                long_term_memories,
+            )
 
         results = await search_long_term_memories(
             "What is the capital of France?",
@@ -195,11 +196,13 @@ class TestLongTermMemoryIntegration:
             LongTermMemory(text="France is a country in Europe", session_id="123"),
         ]
 
-        await index_long_term_memories(
-            async_redis_client,
-            long_term_memories,
-            background_tasks=BackgroundTasks(),
-        )
+        with mock.patch(
+            "agent_memory_server.long_term_memory.get_redis_conn",
+            return_value=async_redis_client,
+        ):
+            await index_long_term_memories(
+                long_term_memories,
+            )
 
         results = await search_long_term_memories(
             "What is the capital of France?",

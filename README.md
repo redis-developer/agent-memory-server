@@ -279,3 +279,35 @@ python -m pytest
 3. Commit your changes
 4. Push to the branch
 5. Create a Pull Request
+
+## Running the Background Task Worker
+
+The Redis Memory Server uses Docket for background task management. There are two ways to run the worker:
+
+### 1. Using the Docket CLI
+
+After installing the package, you can run the worker using the Docket CLI command:
+
+```bash
+docket worker --tasks agent_memory_server.docket_tasks:task_collection
+```
+
+You can customize the concurrency and redelivery timeout:
+
+```bash
+docket worker --tasks agent_memory_server.docket_tasks:task_collection --concurrency 5 --redelivery-timeout 60
+```
+
+### 2. Using Python Code
+
+Alternatively, you can run the worker directly in Python:
+
+```bash
+python -m agent_memory_server.worker
+```
+
+With customization options:
+
+```bash
+python -m agent_memory_server.worker --concurrency 5 --redelivery-timeout 60
+```

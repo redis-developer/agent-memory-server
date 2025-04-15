@@ -123,8 +123,11 @@ class TestMemoryEndpoints:
 
     @pytest.mark.requires_api_keys
     @pytest.mark.asyncio
-    async def test_put_memory_stores_messages_in_long_term_memory(self, client):
+    async def test_put_memory_stores_messages_in_long_term_memory(
+        self, client_with_mock_background_tasks, mock_background_tasks
+    ):
         """Test the put_memory endpoint"""
+        client = client_with_mock_background_tasks
         payload = {
             "messages": [
                 {"role": "user", "content": "Hello"},
@@ -133,12 +136,8 @@ class TestMemoryEndpoints:
             "context": "Previous context",
         }
         mock_settings = Settings(long_term_memory=True)
-        mock_add_task = MagicMock()
 
-        with (
-            patch("agent_memory_server.api.settings", mock_settings),
-            patch("agent_memory_server.api.BackgroundTasks.add_task", mock_add_task),
-        ):
+        with patch("agent_memory_server.api.settings", mock_settings):
             response = await client.put("/sessions/test-session/memory", json=payload)
 
         assert response.status_code == 200
@@ -148,15 +147,21 @@ class TestMemoryEndpoints:
         assert data["status"] == "ok"
 
         # Check that background tasks were called
-        assert mock_add_task.call_count == 1
+        assert mock_background_tasks.add_task.call_count == 1
 
         # Check that the last call was for long-term memory indexing
-        assert mock_add_task.call_args_list[-1][0][0] == index_long_term_memories
+        assert (
+            mock_background_tasks.add_task.call_args_list[-1][0][0]
+            == index_long_term_memories
+        )
 
     @pytest.mark.requires_api_keys
     @pytest.mark.asyncio
-    async def test_post_memory_compacts_long_conversation(self, client):
+    async def test_post_memory_compacts_long_conversation(
+        self, client_with_mock_background_tasks, mock_background_tasks
+    ):
         """Test the post_memory endpoint"""
+        client = client_with_mock_background_tasks
         payload = {
             "messages": [
                 {"role": "user", "content": "Hello"},
@@ -165,12 +170,9 @@ class TestMemoryEndpoints:
             "context": "Previous context",
         }
         mock_settings = Settings(window_size=1, long_term_memory=False)
-        mock_add_task = MagicMock()
+        MagicMock()
 
-        with (
-            patch("agent_memory_server.api.messages.settings", mock_settings),
-            patch("agent_memory_server.api.BackgroundTasks.add_task", mock_add_task),
-        ):
+        with patch("agent_memory_server.api.messages.settings", mock_settings):
             response = await client.put("/sessions/test-session/memory", json=payload)
 
         assert response.status_code == 200
@@ -180,10 +182,12 @@ class TestMemoryEndpoints:
         assert data["status"] == "ok"
 
         # Check that background tasks were called
-        assert mock_add_task.call_count == 1
+        assert mock_background_tasks.add_task.call_count == 1
 
         # Check that the last call was for compaction
-        assert mock_add_task.call_args_list[-1][0][0] == summarize_session
+        assert (
+            mock_background_tasks.add_task.call_args_list[-1][0][0] == summarize_session
+        )
 
     @pytest.mark.asyncio
     async def test_delete_memory(self, client, session):

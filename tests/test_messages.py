@@ -160,6 +160,7 @@ class TestSetSessionMemory:
         mock_async_redis_client.pipeline = MagicMock(return_value=mock_pipeline)
 
         mock_background_tasks = MagicMock()
+        mock_background_tasks.add_task = AsyncMock()
 
         memory = SessionMemory(
             messages=[MemoryMessage(role="user", content="Hello")],
@@ -181,7 +182,6 @@ class TestSetSessionMemory:
         # Verify summarization task was added
         mock_background_tasks.add_task.assert_called_with(
             summarize_session,
-            mock_async_redis_client,
             "test-session",
             "gpt-4o-mini",
             20,
@@ -205,6 +205,7 @@ class TestSetSessionMemory:
         mock_async_redis_client.pipeline = MagicMock(return_value=mock_pipeline)
 
         mock_background_tasks = MagicMock()
+        mock_background_tasks.add_task = AsyncMock()
 
         memory = SessionMemory(
             messages=[MemoryMessage(role="user", content="Hello")],
@@ -228,9 +229,7 @@ class TestSetSessionMemory:
         assert mock_background_tasks.add_task.call_args_list == [
             call(
                 index_long_term_memories,
-                mock_async_redis_client,
                 [LongTermMemory(session_id="test-session", text="user: Hello")],
-                mock_background_tasks,
             ),
         ]
 

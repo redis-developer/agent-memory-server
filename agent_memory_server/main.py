@@ -1,4 +1,5 @@
 import os
+import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -7,6 +8,7 @@ from fastapi import FastAPI
 from agent_memory_server import utils
 from agent_memory_server.api import router as memory_router
 from agent_memory_server.config import settings
+from agent_memory_server.docket_tasks import register_tasks
 from agent_memory_server.healthcheck import router as health_router
 from agent_memory_server.llms import MODEL_CONFIGS, ModelProvider
 from agent_memory_server.logging import configure_logging, get_logger
@@ -87,6 +89,20 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to ensure RediSearch index: {e}")
             raise
 
+    # Initialize Docket for background tasks if enabled
+    if settings.use_docket:
+        try:
+            await register_tasks()
+            logger.info("Initialized Docket for background tasks")
+            logger.info("To run the worker, use one of these methods:")
+            logger.info(
+                "1. CLI: docket worker --tasks agent_memory_server.docket_tasks:task_collection"
+            )
+            logger.info("2. Python: python -m agent_memory_server.worker")
+        except Exception as e:
+            logger.error(f"Failed to initialize Docket: {e}")
+            raise
+
     # Show available models
     openai_models = [
         model
@@ -138,6 +154,31 @@ def on_start_logger(port: int):
 
 # Run the application
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8000"))
+    # Parse command line arguments for port
+    port = settings.port
+
+    # Check if --port argument is provided
+    if "--port" in sys.argv:
+        try:
+            port_index = sys.argv.index("--port") + 1
+            if port_index < len(sys.argv):
+                port = int(sys.argv[port_index])
+                print(f"Using port from command line: {port}")
+        except (ValueError, IndexError):
+            # If conversion fails or index out of bounds, use default
+            print(f"Invalid port argument, using default: {port}")
+    else:
+        print(f"No port argument provided, using default: {port}")
+
+    # Explicitly unset the PORT environment variable if it exists
+    if "PORT" in os.environ:
+        port_val = os.environ.pop("PORT")
+        print(f"Removed environment variable PORT={port_val}")
+
     on_start_logger(port)
-    uvicorn.run("agent_memory_server.main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(
+        app,  # Using the app instance directly
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+    )

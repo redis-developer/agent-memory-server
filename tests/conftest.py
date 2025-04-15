@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis import Redis
 from redis.asyncio import ConnectionPool, Redis as AsyncRedis
@@ -14,6 +14,7 @@ from testcontainers.compose import DockerCompose
 
 from agent_memory_server.api import router as memory_router
 from agent_memory_server.config import settings
+from agent_memory_server.dependencies import DocketBackgroundTasks, get_background_tasks
 from agent_memory_server.healthcheck import router as health_router
 from agent_memory_server.llms import OpenAIClientWrapper
 from agent_memory_server.messages import (
@@ -105,7 +106,6 @@ async def session(use_test_redis_connection, async_redis_client):
     session_id = "test-session"
 
     await index_long_term_memories(
-        async_redis_client,
         [
             LongTermMemory(
                 session_id=session_id,
@@ -118,7 +118,6 @@ async def session(use_test_redis_connection, async_redis_client):
                 namespace="test-namespace",
             ),
         ],
-        background_tasks=BackgroundTasks(),
     )
 
     # Add messages to session memory
@@ -137,7 +136,7 @@ async def session(use_test_redis_connection, async_redis_client):
             tokens=150,
             namespace="test-namespace",
         ),
-        background_tasks=BackgroundTasks(),
+        background_tasks=DocketBackgroundTasks(),
     )
 
     return session_id
@@ -243,7 +242,10 @@ def pytest_collection_modifyitems(
             item.add_marker(skip_api)
 
 
-MockBackgroundTasks = mock.Mock(name="BackgroundTasks", spec=BackgroundTasks)
+@pytest.fixture()
+def mock_background_tasks():
+    """Create a mock DocketBackgroundTasks instance"""
+    return mock.Mock(name="DocketBackgroundTasks", spec=DocketBackgroundTasks)
 
 
 @pytest.fixture()
@@ -259,7 +261,7 @@ def app(use_test_redis_connection):
 
 
 @pytest.fixture()
-def app_with_mock_background_tasks(use_test_redis_connection):
+def app_with_mock_background_tasks(use_test_redis_connection, mock_background_tasks):
     """Create a test FastAPI app with routers"""
     app = FastAPI()
 
@@ -267,8 +269,7 @@ def app_with_mock_background_tasks(use_test_redis_connection):
     app.include_router(health_router)
     app.include_router(memory_router)
 
-    mock_background_tasks = MockBackgroundTasks()
-    app.dependency_overrides[BackgroundTasks] = lambda: mock_background_tasks
+    app.dependency_overrides[get_background_tasks] = lambda: mock_background_tasks
 
     return app
 

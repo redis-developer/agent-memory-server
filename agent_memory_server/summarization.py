@@ -3,7 +3,6 @@ import logging
 
 import tiktoken
 from redis import WatchError
-from redis.asyncio import Redis
 
 from agent_memory_server.config import settings
 from agent_memory_server.llms import (
@@ -12,7 +11,7 @@ from agent_memory_server.llms import (
     get_model_config,
 )
 from agent_memory_server.models import MemoryMessage
-from agent_memory_server.utils import Keys, get_model_client
+from agent_memory_server.utils import Keys, get_model_client, get_redis_conn
 
 
 logger = logging.getLogger(__name__)
@@ -110,7 +109,6 @@ New summary:
 
 
 async def summarize_session(
-    redis: Redis,
     session_id: str,
     model: str,
     window_size: int,
@@ -132,6 +130,7 @@ async def summarize_session(
         client: The client wrapper (OpenAI or Anthropic)
         redis_conn: Redis connection
     """
+    redis = get_redis_conn()
     client = await get_model_client(settings.generation_model)
 
     messages_key = Keys.messages_key(session_id)

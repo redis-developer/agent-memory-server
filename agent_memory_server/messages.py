@@ -2,11 +2,11 @@ import json
 import logging
 import time
 
-from fastapi import BackgroundTasks
 from redis import WatchError
 from redis.asyncio import Redis
 
 from agent_memory_server.config import settings
+from agent_memory_server.dependencies import DocketBackgroundTasks
 from agent_memory_server.long_term_memory import index_long_term_memories
 from agent_memory_server.models import (
     LongTermMemory,
@@ -87,18 +87,16 @@ async def set_session_memory(
     redis: Redis,
     session_id: str,
     memory: SessionMemory,
-    background_tasks: BackgroundTasks,
+    background_tasks: DocketBackgroundTasks,
 ):
     """
     Create or update a session's memory
-
-    TODO: This shouldn't need BackgroundTasks.
 
     Args:
         redis: The Redis client
         session_id: The session ID
         memory: The session memory to set
-        background_tasks: The background tasks to add the summarization task to
+        background_tasks: Background tasks instance
     """
     sessions_key = Keys.sessions_key(namespace=memory.namespace)
     messages_key = Keys.messages_key(session_id, namespace=memory.namespace)
@@ -127,32 +125,28 @@ async def set_session_memory(
     # Check if window size is exceeded
     current_size = await redis.llen(messages_key)  # type: ignore
     if current_size > settings.window_size:
-        # Handle summarization in background
-        background_tasks.add_task(
+        # Add summarization task
+        await background_tasks.add_task(
             summarize_session,
-            redis,
             session_id,
             settings.generation_model,
             settings.window_size,
         )
 
     # If long-term memory is enabled, index messages
-    # TODO: Use a distributed task queue
-    # TODO: Allow strategies for long-term memory: indexing
-    #       messages vs. extracting memories from messages, etc.
     if settings.long_term_memory:
-        background_tasks.add_task(
+        memories = [
+            LongTermMemory(
+                session_id=session_id,
+                text=f"{msg.role}: {msg.content}",
+                namespace=memory.namespace,
+            )
+            for msg in memory.messages
+        ]
+
+        await background_tasks.add_task(
             index_long_term_memories,
-            redis,
-            [
-                LongTermMemory(
-                    session_id=session_id,
-                    text=f"{msg.role}: {msg.content}",
-                    namespace=memory.namespace,
-                )
-                for msg in memory.messages
-            ],
-            background_tasks,
+            memories,
         )
 
 

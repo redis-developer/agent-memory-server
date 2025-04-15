@@ -30,5 +30,9 @@ class Settings(BaseSettings):
     redisvl_index_name: str = "memory"
     redisvl_index_prefix: str = "memory"
 
+    # Docket settings
+    docket_name: str = "memory-server"
+    use_docket: bool = True
+
 
 settings = Settings()

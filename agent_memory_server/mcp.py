@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
@@ -13,6 +13,7 @@ from agent_memory_server.api import (
     search_long_term_memory as core_search_long_term_memory,
 )
 from agent_memory_server.config import settings
+from agent_memory_server.dependencies import get_background_tasks
 from agent_memory_server.models import (
     AckResponse,
     CreateLongTermMemoryPayload,
@@ -75,7 +76,7 @@ async def create_long_term_memories(
         An acknowledgement response indicating success
     """
     return await core_create_long_term_memory(
-        payload, background_tasks=BackgroundTasks()
+        payload, background_tasks=get_background_tasks()
     )
 
 

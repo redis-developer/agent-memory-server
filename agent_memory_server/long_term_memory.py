@@ -3,11 +3,11 @@ import time
 from functools import reduce
 
 import nanoid
-from fastapi import BackgroundTasks
 from redis.asyncio import Redis
 from redisvl.query import VectorQuery, VectorRangeQuery
 from redisvl.utils.vectorize import OpenAITextVectorizer
 
+from agent_memory_server.dependencies import get_background_tasks
 from agent_memory_server.extraction import handle_extraction
 from agent_memory_server.filters import (
     CreatedAt,
@@ -25,6 +25,7 @@ from agent_memory_server.models import (
 )
 from agent_memory_server.utils import (
     Keys,
+    get_redis_conn,
     get_search_index,
     safe_get,
 )
@@ -33,11 +34,10 @@ from agent_memory_server.utils import (
 logger = logging.getLogger(__name__)
 
 
-async def extract_memory_structure(
-    redis: Redis, _id: str, text: str, namespace: str | None
-):
+async def extract_memory_structure(_id: str, text: str, namespace: str | None):
+    redis = get_redis_conn()
+
     # Process messages for topic/entity extraction
-    # TODO: Move into background task.
     topics, entities = await handle_extraction(text)
 
     # Convert lists to comma-separated strings for TAG fields
@@ -65,14 +65,13 @@ async def compact_long_term_memories(redis: Redis) -> None:
 
 
 async def index_long_term_memories(
-    redis: Redis,
     memories: list[LongTermMemory],
-    background_tasks: BackgroundTasks,
 ) -> None:
     """
     Index long-term memories in Redis for search
     """
-
+    redis = get_redis_conn()
+    background_tasks = get_background_tasks()
     vectorizer = OpenAITextVectorizer()
     embeddings = await vectorizer.aembed_many(
         [memory.text for memory in memories],
@@ -100,8 +99,8 @@ async def index_long_term_memories(
                 },
             )
 
-            background_tasks.add_task(
-                extract_memory_structure, redis, id_, memory.text, memory.namespace
+            await background_tasks.add_task(
+                extract_memory_structure, id_, memory.text, memory.namespace
             )
 
         await pipe.execute()

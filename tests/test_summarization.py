@@ -111,13 +111,18 @@ class TestSummarizeSession:
 
         mock_summarization.return_value = ("New summary", 300)
 
-        with patch(
-            "agent_memory_server.summarization.get_model_client"
-        ) as mock_get_model_client:
+        with (
+            patch(
+                "agent_memory_server.summarization.get_model_client"
+            ) as mock_get_model_client,
+            patch(
+                "agent_memory_server.summarization.get_redis_conn",
+                return_value=mock_async_redis_client,
+            ),
+        ):
             mock_get_model_client.return_value = mock_openai_client
 
             await summarize_session(
-                mock_async_redis_client,
                 session_id,
                 model,
                 window_size,
@@ -178,12 +183,15 @@ class TestSummarizeSession:
         pipeline_mock.lpop = AsyncMock(return_value=True)
         pipeline_mock.execute = AsyncMock(return_value=True)
 
-        await summarize_session(
-            mock_async_redis_client,
-            session_id,
-            model,
-            window_size,
-        )
+        with patch(
+            "agent_memory_server.summarization.get_redis_conn",
+            return_value=mock_async_redis_client,
+        ):
+            await summarize_session(
+                session_id,
+                model,
+                window_size,
+            )
 
         assert mock_summarization.call_count == 0
         assert pipeline_mock.lrange.call_count == 0
