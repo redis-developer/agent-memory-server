@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+import ulid
 from redis.commands.search.document import Document
-from ulid import ULID
 
 from agent_memory_server.filters import Namespace, SessionId
 from agent_memory_server.long_term_memory import (
@@ -108,7 +108,7 @@ class TestLongTermMemory:
         mock_query.return_value = [
             Document(
                 id=b"doc1",
-                id_=str(ULID()),
+                id_=str(ulid.new()),
                 text=b"Hello, world!",
                 vector_distance=0.25,
                 created_at=mock_now,
@@ -121,7 +121,7 @@ class TestLongTermMemory:
             ),
             Document(
                 id=b"doc2",
-                id_=str(ULID()),
+                id_=str(ulid.new()),
                 text=b"Hi there!",
                 vector_distance=0.75,
                 created_at=mock_now,

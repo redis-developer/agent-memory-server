@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-memory-server"
-version = "0.2.0"
+dynamic = ["version"]
 description = "A Memory Server for LLM Agents and Applications"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Andrew Brookins", email = "andrew.brookins@redis.com" }]
 dependencies = [
     "accelerate>=1.6.0",
+    "agent-memory-client",
     "anthropic>=0.15.0",
     "bertopic<0.17.0,>=0.16.4",
     "fastapi>=0.115.11",
@@ -40,6 +41,15 @@ dependencies = [
 
 [project.scripts]
 agent-memory = "agent_memory_server.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/redis-developer/agent-memory-server"
+Repository = "https://github.com/redis-developer/agent-memory-server"
+Documentation = "https://github.com/redis-developer/agent-memory-server/tree/main/docs"
+Issues = "https://github.com/redis-developer/agent-memory-server/issues"
+
+[tool.hatch.version]
+path = "agent_memory_server/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent_memory_server"]
@@ -122,6 +132,7 @@ dev = [
     "testcontainers>=3.7.0",
     "pre-commit>=3.6.0",
     "freezegun>=1.2.0",
+    "-e ./agent-memory-client",
 ]
 
 [tool.ruff.lint.per-file-ignores]

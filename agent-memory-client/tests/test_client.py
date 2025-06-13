@@ -7,16 +7,13 @@ pagination utilities, validation, and enhanced convenience methods.
 
 import asyncio
 from collections.abc import AsyncGenerator
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
-from agent_memory_client import MemoryAPIClient, MemoryClientConfig
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
 
-from agent_memory_server.api import router as memory_router
-from agent_memory_server.healthcheck import router as health_router
-from agent_memory_server.models import (
+from agent_memory_client import MemoryAPIClient, MemoryClientConfig
+from agent_memory_client.models import (
     AckResponse,
     ClientMemoryRecord,
     MemoryMessage,
@@ -28,29 +25,19 @@ from agent_memory_server.models import (
 
 
 @pytest.fixture
-def memory_app() -> FastAPI:
-    """Create a test FastAPI app with memory routers for testing the client."""
-    app = FastAPI()
-    app.include_router(health_router)
-    app.include_router(memory_router)
-    return app
+async def enhanced_test_client() -> AsyncGenerator[MemoryAPIClient, None]:
+    """Create a memory client for testing with mocked HTTP client."""
+    config = MemoryClientConfig(
+        base_url="http://test", default_namespace="test-namespace"
+    )
+    client = MemoryAPIClient(config)
 
+    # Mock the HTTP client to avoid actual network calls
+    client._client = AsyncMock(spec=httpx.AsyncClient)
 
-@pytest.fixture
-async def enhanced_test_client(
-    memory_app: FastAPI,
-) -> AsyncGenerator[MemoryAPIClient, None]:
-    """Create a memory client that uses the test FastAPI app."""
-    async with AsyncClient(
-        transport=ASGITransport(app=memory_app),
-        base_url="http://test",
-    ) as http_client:
-        config = MemoryClientConfig(
-            base_url="http://test", default_namespace="test-namespace"
-        )
-        client = MemoryAPIClient(config)
-        client._client = http_client
-        yield client
+    yield client
+
+    await client.close()
 
 
 class TestMemoryLifecycleManagement:

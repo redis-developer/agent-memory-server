@@ -8,11 +8,14 @@ pip install uv
 
 ```bash
 # Development workflow
-uv install                    # Install dependencies
+uv venv                      # Create a virtualenv (once)
+source .venv/bin/activate    # Activate the virtualenv (start of terminal session)
+uv install --all-extras      # Install dependencies
+uv sync --all-extras         # Sync latest dependencies
 uv run ruff check            # Run linting
 uv run ruff format           # Format code
-uv run pytest               # Run tests
-uv run pytest tests/        # Run specific test directory
+uv run pytest                # Run tests
+uv run pytest tests/         # Run specific test directory
 
 # Server commands
 uv run agent-memory api      # Start REST API server (default port 8000)

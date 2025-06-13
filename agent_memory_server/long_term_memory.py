@@ -6,11 +6,11 @@ from datetime import UTC, datetime
 from functools import reduce
 from typing import Any
 
+import ulid
 from redis.asyncio import Redis
 from redis.commands.search.query import Query
 from redisvl.query import VectorQuery, VectorRangeQuery
 from redisvl.utils.vectorize import OpenAITextVectorizer
-from ulid import ULID
 
 from agent_memory_server.config import settings
 from agent_memory_server.dependencies import get_background_tasks
@@ -244,7 +244,7 @@ async def merge_memories_with_llm(memories: list[dict], llm_client: Any = None) 
     # Create the merged memory
     merged_memory = {
         "text": merged_text.strip(),
-        "id_": str(ULID()),
+        "id_": str(ulid.new()),
         "user_id": user_id,
         "session_id": session_id,
         "namespace": namespace,
@@ -664,7 +664,7 @@ async def index_long_term_memories(
     async with redis.pipeline(transaction=False) as pipe:
         for idx, vector in enumerate(embeddings):
             memory = processed_memories[idx]
-            id_ = memory.id if memory.id else str(ULID())
+            id_ = memory.id if memory.id else str(ulid.new())
             key = Keys.memory_key(id_, memory.namespace)
 
             # Generate memory hash for the memory
@@ -1426,7 +1426,7 @@ async def deduplicate_by_semantic_search(
 
             # Convert back to LongTermMemory
             merged_memory_obj = MemoryRecord(
-                id=memory.id or str(ULID()),
+                id=memory.id or str(ulid.new()),
                 text=merged_memory["text"],
                 user_id=merged_memory["user_id"],
                 session_id=merged_memory["session_id"],
@@ -1646,7 +1646,7 @@ async def extract_memories_from_messages(
 
                     # Create a new memory record from the extraction
                     extracted_memory = MemoryRecord(
-                        id=str(ULID()),  # Server-generated ID
+                        id=str(ulid.new()),  # Server-generated ID
                         text=memory_data["text"],
                         memory_type=memory_data.get("type", "semantic"),
                         topics=memory_data.get("topics", []),

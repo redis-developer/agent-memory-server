@@ -144,7 +144,7 @@ async def session(use_test_redis_connection, async_redis_client):
         long_term_memories = []
         for msg in messages:
             memory = MemoryRecord(
-                id=str(ulid.ULID()),
+                id=str(ulid.new()),
                 text=f"{msg.role}: {msg.content}",
                 session_id=session_id,
                 namespace=namespace,
@@ -163,7 +163,7 @@ async def session(use_test_redis_connection, async_redis_client):
         async with use_test_redis_connection.pipeline(transaction=False) as pipe:
             for idx, vector in enumerate(embeddings):
                 memory = long_term_memories[idx]
-                id_ = memory.id if memory.id else str(ulid.ULID())
+                id_ = memory.id if memory.id else str(ulid.new())
                 key = Keys.memory_key(id_, memory.namespace)
 
                 # Generate memory hash for the memory

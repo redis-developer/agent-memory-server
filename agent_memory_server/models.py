@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal
 
+import ulid
 from mcp.server.fastmcp.prompts import base
 from pydantic import BaseModel, Field
-from ulid import ULID
 
 from agent_memory_server.config import settings
 from agent_memory_server.filters import (
@@ -143,7 +143,7 @@ class ClientMemoryRecord(MemoryRecord):
     """A memory record with a client-provided ID"""
 
     id: str = Field(
-        default=str(ULID()),
+        default_factory=lambda: str(ulid.new()),
         description="Client-provided ID for deduplication and overwrites",
     )
 

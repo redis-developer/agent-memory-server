@@ -1,20 +1,24 @@
 """
-Redis Memory Server API Client
+Agent Memory Server API Client
 
-This module provides a client for the REST API of the Redis Memory Server.
+This module provides a standalone client for the REST API of the Agent Memory Server.
 """
 
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterator
-from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 import httpx
+import ulid
 from pydantic import BaseModel
-from ulid import ULID
 
-from agent_memory_server.filters import (
+from .exceptions import MemoryClientError, MemoryServerError, MemoryValidationError
+from .filters import (
     CreatedAt,
     Entities,
     LastAccessed,
@@ -24,49 +28,17 @@ from agent_memory_server.filters import (
     Topics,
     UserId,
 )
-from agent_memory_server.models import (
+from .models import (
     AckResponse,
     ClientMemoryRecord,
-    CreateMemoryRecordRequest,
     HealthCheckResponse,
-    MemoryPromptRequest,
-    MemoryPromptResponse,
     MemoryRecord,
     MemoryRecordResults,
-    SearchRequest,
+    ModelNameLiteral,
     SessionListResponse,
     WorkingMemory,
-    WorkingMemoryRequest,
     WorkingMemoryResponse,
 )
-
-
-# Model name literals for model-specific window sizes
-ModelNameLiteral = Literal[
-    "gpt-3.5-turbo",
-    "gpt-3.5-turbo-16k",
-    "gpt-4",
-    "gpt-4-32k",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o1",
-    "o1-mini",
-    "o3-mini",
-    "text-embedding-ada-002",
-    "text-embedding-3-small",
-    "text-embedding-3-large",
-    "claude-3-opus-20240229",
-    "claude-3-sonnet-20240229",
-    "claude-3-haiku-20240307",
-    "claude-3-5-sonnet-20240620",
-    "claude-3-7-sonnet-20250219",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku-20241022",
-    "claude-3-7-sonnet-latest",
-    "claude-3-5-sonnet-latest",
-    "claude-3-5-haiku-latest",
-    "claude-3-opus-latest",
-]
 
 
 class MemoryClientConfig(BaseModel):
@@ -79,12 +51,13 @@ class MemoryClientConfig(BaseModel):
 
 class MemoryAPIClient:
     """
-    Client for the Redis Memory Server REST API.
+    Client for the Agent Memory Server REST API.
 
     This client provides methods to interact with all server endpoints:
     - Health check
     - Session management (list, get, put, delete)
     - Long-term memory (create, search)
+    - Enhanced functionality (lifecycle, batch, pagination, validation)
     """
 
     def __init__(self, config: MemoryClientConfig):
@@ -100,17 +73,31 @@ class MemoryAPIClient:
             timeout=config.timeout,
         )
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the underlying HTTP client."""
         await self._client.aclose()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "Self":
         """Support using the client as an async context manager."""
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Close the client when exiting the context manager."""
         await self.close()
+
+    def _handle_http_error(self, response: httpx.Response) -> None:
+        """Handle HTTP errors and convert to appropriate exceptions."""
+        if response.status_code == 404:
+            from .exceptions import MemoryNotFoundError
+
+            raise MemoryNotFoundError(f"Resource not found: {response.url}")
+        elif response.status_code >= 400:
+            try:
+                error_data = response.json()
+                message = error_data.get("detail", f"HTTP {response.status_code}")
+            except Exception:
+                message = f"HTTP {response.status_code}: {response.text}"
+            raise MemoryServerError(message, response.status_code)
 
     async def health_check(self) -> HealthCheckResponse:
         """
@@ -119,9 +106,13 @@ class MemoryAPIClient:
         Returns:
             HealthCheckResponse with current server timestamp
         """
-        response = await self._client.get("/v1/health")
-        response.raise_for_status()
-        return HealthCheckResponse(**response.json())
+        try:
+            response = await self._client.get("/v1/health")
+            response.raise_for_status()
+            return HealthCheckResponse(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     async def list_sessions(
         self, limit: int = 20, offset: int = 0, namespace: str | None = None
@@ -146,9 +137,13 @@ class MemoryAPIClient:
         elif self.config.default_namespace is not None:
             params["namespace"] = self.config.default_namespace
 
-        response = await self._client.get("/v1/working-memory/", params=params)
-        response.raise_for_status()
-        return SessionListResponse(**response.json())
+        try:
+            response = await self._client.get("/v1/working-memory/", params=params)
+            response.raise_for_status()
+            return SessionListResponse(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     async def get_session_memory(
         self,
@@ -172,7 +167,8 @@ class MemoryAPIClient:
             WorkingMemoryResponse containing messages, context and metadata
 
         Raises:
-            httpx.HTTPStatusError: If the session is not found (404) or other errors
+            MemoryNotFoundError: If the session is not found
+            MemoryServerError: For other server errors
         """
         params = {}
 
@@ -182,19 +178,23 @@ class MemoryAPIClient:
             params["namespace"] = self.config.default_namespace
 
         if window_size is not None:
-            params["window_size"] = window_size
+            params["window_size"] = str(window_size)
 
         if model_name is not None:
             params["model_name"] = model_name
 
         if context_window_max is not None:
-            params["context_window_max"] = context_window_max
+            params["context_window_max"] = str(context_window_max)
 
-        response = await self._client.get(
-            f"/v1/working-memory/{session_id}", params=params
-        )
-        response.raise_for_status()
-        return WorkingMemoryResponse(**response.json())
+        try:
+            response = await self._client.get(
+                f"/v1/working-memory/{session_id}", params=params
+            )
+            response.raise_for_status()
+            return WorkingMemoryResponse(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     async def put_session_memory(
         self, session_id: str, memory: WorkingMemory
@@ -213,12 +213,16 @@ class MemoryAPIClient:
         if memory.namespace is None and self.config.default_namespace is not None:
             memory.namespace = self.config.default_namespace
 
-        response = await self._client.put(
-            f"/v1/working-memory/{session_id}",
-            json=memory.model_dump(exclude_none=True, mode="json"),
-        )
-        response.raise_for_status()
-        return WorkingMemoryResponse(**response.json())
+        try:
+            response = await self._client.put(
+                f"/v1/working-memory/{session_id}",
+                json=memory.model_dump(exclude_none=True, mode="json"),
+            )
+            response.raise_for_status()
+            return WorkingMemoryResponse(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     async def delete_session_memory(
         self, session_id: str, namespace: str | None = None
@@ -239,11 +243,15 @@ class MemoryAPIClient:
         elif self.config.default_namespace is not None:
             params["namespace"] = self.config.default_namespace
 
-        response = await self._client.delete(
-            f"/v1/working-memory/{session_id}", params=params
-        )
-        response.raise_for_status()
-        return AckResponse(**response.json())
+        try:
+            response = await self._client.delete(
+                f"/v1/working-memory/{session_id}", params=params
+            )
+            response.raise_for_status()
+            return AckResponse(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     async def set_working_memory_data(
         self,
@@ -356,7 +364,7 @@ class MemoryAPIClient:
         # Auto-generate IDs for memories that don't have them
         for memory in final_memories:
             if not memory.id:
-                memory.id = str(ULID())
+                memory.id = str(ulid.new())
 
         # Create new working memory with the memories
         working_memory = WorkingMemory(
@@ -384,7 +392,7 @@ class MemoryAPIClient:
             AckResponse indicating success
 
         Raises:
-            httpx.HTTPStatusError: If long-term memory is disabled (400) or other errors
+            MemoryServerError: If long-term memory is disabled or other errors
         """
         # Apply default namespace if needed
         if self.config.default_namespace is not None:
@@ -392,13 +400,20 @@ class MemoryAPIClient:
                 if memory.namespace is None:
                     memory.namespace = self.config.default_namespace
 
-        payload = CreateMemoryRecordRequest(memories=memories)
-        response = await self._client.post(
-            "/v1/long-term-memory/",
-            json=payload.model_dump(exclude_none=True, mode="json"),
-        )
-        response.raise_for_status()
-        return AckResponse(**response.json())
+        payload = {
+            "memories": [m.model_dump(exclude_none=True, mode="json") for m in memories]
+        }
+
+        try:
+            response = await self._client.post(
+                "/v1/long-term-memory/",
+                json=payload,
+            )
+            response.raise_for_status()
+            return AckResponse(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     async def search_long_term_memory(
         self,
@@ -428,6 +443,7 @@ class MemoryAPIClient:
             last_accessed: Optional last accessed date filter
             user_id: Optional user ID filter
             distance_threshold: Optional distance threshold for search results
+            memory_type: Optional memory type filter
             limit: Maximum number of results to return (default: 10)
             offset: Offset for pagination (default: 0)
 
@@ -435,7 +451,7 @@ class MemoryAPIClient:
             MemoryRecordResults with matching memories and metadata
 
         Raises:
-            httpx.HTTPStatusError: If long-term memory is disabled (400) or other errors
+            MemoryServerError: If long-term memory is disabled or other errors
         """
         # Convert dictionary filters to their proper filter objects if needed
         if isinstance(session_id, dict):
@@ -459,27 +475,46 @@ class MemoryAPIClient:
         if namespace is None and self.config.default_namespace is not None:
             namespace = Namespace(eq=self.config.default_namespace)
 
-        payload = SearchRequest(
-            text=text,
-            session_id=session_id,
-            namespace=namespace,
-            topics=topics,
-            entities=entities,
-            created_at=created_at,
-            last_accessed=last_accessed,
-            user_id=user_id,
-            distance_threshold=distance_threshold,
-            memory_type=memory_type,
-            limit=limit,
-            offset=offset,
-        )
+        payload = {
+            "text": text,
+            "limit": limit,
+            "offset": offset,
+        }
 
-        response = await self._client.post(
-            "/v1/long-term-memory/search",
-            json=payload.model_dump(exclude_none=True, mode="json"),
-        )
-        response.raise_for_status()
-        return MemoryRecordResults(**response.json())
+        # Add filters if provided
+        if session_id:
+            payload["session_id"] = session_id.model_dump(exclude_none=True)
+        if namespace:
+            payload["namespace"] = namespace.model_dump(exclude_none=True)
+        if topics:
+            payload["topics"] = topics.model_dump(exclude_none=True)
+        if entities:
+            payload["entities"] = entities.model_dump(exclude_none=True)
+        if created_at:
+            payload["created_at"] = created_at.model_dump(
+                exclude_none=True, mode="json"
+            )
+        if last_accessed:
+            payload["last_accessed"] = last_accessed.model_dump(
+                exclude_none=True, mode="json"
+            )
+        if user_id:
+            payload["user_id"] = user_id.model_dump(exclude_none=True)
+        if memory_type:
+            payload["memory_type"] = memory_type.model_dump(exclude_none=True)
+        if distance_threshold is not None:
+            payload["distance_threshold"] = distance_threshold
+
+        try:
+            response = await self._client.post(
+                "/v1/long-term-memory/search",
+                json=payload,
+            )
+            response.raise_for_status()
+            return MemoryRecordResults(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     async def search_memories(
         self,
@@ -530,7 +565,7 @@ class MemoryAPIClient:
             MemoryRecordResults with matching memories from both memory types
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            MemoryServerError: If the request fails
         """
         # Convert dictionary filters to their proper filter objects if needed
         if isinstance(session_id, dict):
@@ -554,222 +589,46 @@ class MemoryAPIClient:
         if namespace is None and self.config.default_namespace is not None:
             namespace = Namespace(eq=self.config.default_namespace)
 
-        payload = SearchRequest(
-            text=text,
-            session_id=session_id,
-            namespace=namespace,
-            topics=topics,
-            entities=entities,
-            created_at=created_at,
-            last_accessed=last_accessed,
-            user_id=user_id,
-            distance_threshold=distance_threshold,
-            memory_type=memory_type,
-            limit=limit,
-            offset=offset,
-        )
+        payload = {
+            "text": text,
+            "limit": limit,
+            "offset": offset,
+        }
 
-        response = await self._client.post(
-            "/v1/memory/search",
-            json=payload.model_dump(exclude_none=True, mode="json"),
-        )
-        response.raise_for_status()
-        return MemoryRecordResults(**response.json())
-
-    async def memory_prompt(
-        self,
-        query: str,
-        session_id: str | None = None,
-        namespace: str | None = None,
-        window_size: int | None = None,
-        model_name: ModelNameLiteral | None = None,
-        context_window_max: int | None = None,
-        long_term_search: SearchRequest | None = None,
-    ) -> MemoryPromptResponse:
-        """
-        Hydrate a user query with memory context and return a prompt
-        ready to send to an LLM.
-
-        This method can retrieve relevant session history and long-term memories
-        to provide context for the query.
-
-        Args:
-            query: The user's query text
-            session_id: Optional session ID to retrieve history from
-            namespace: Optional namespace for session and long-term memories
-            window_size: Optional number of messages to include from session history
-            model_name: Optional model name to determine context window size
-            context_window_max: Optional direct specification of context window max tokens
-            long_term_search: Optional SearchRequest for specific long-term memory filtering
-
-        Returns:
-            MemoryPromptResponse containing a list of messages with context
-
-        Raises:
-            httpx.HTTPStatusError: If the request fails or if neither session_id nor long_term_search is provided
-        """
-        # Prepare the request payload
-        session_params = None
-        if session_id is not None:
-            session_params = WorkingMemoryRequest(
-                session_id=session_id,
-                namespace=namespace or self.config.default_namespace,
-                window_size=window_size or 12,  # Default from settings
-                model_name=model_name,
-                context_window_max=context_window_max,
+        # Add filters if provided
+        if session_id:
+            payload["session_id"] = session_id.model_dump(exclude_none=True)
+        if namespace:
+            payload["namespace"] = namespace.model_dump(exclude_none=True)
+        if topics:
+            payload["topics"] = topics.model_dump(exclude_none=True)
+        if entities:
+            payload["entities"] = entities.model_dump(exclude_none=True)
+        if created_at:
+            payload["created_at"] = created_at.model_dump(
+                exclude_none=True, mode="json"
             )
-
-        # If no explicit long_term_search is provided but we have a query, create a basic one
-        if long_term_search is None and query:
-            # Use default namespace from config if none provided
-            _namespace = None
-            if namespace is not None:
-                _namespace = Namespace(eq=namespace)
-            elif self.config.default_namespace is not None:
-                _namespace = Namespace(eq=self.config.default_namespace)
-
-            long_term_search = SearchRequest(
-                text=query,
-                namespace=_namespace,
+        if last_accessed:
+            payload["last_accessed"] = last_accessed.model_dump(
+                exclude_none=True, mode="json"
             )
+        if user_id:
+            payload["user_id"] = user_id.model_dump(exclude_none=True)
+        if memory_type:
+            payload["memory_type"] = memory_type.model_dump(exclude_none=True)
+        if distance_threshold is not None:
+            payload["distance_threshold"] = distance_threshold
 
-        # Create the request payload
-        payload = MemoryPromptRequest(
-            query=query,
-            session=session_params,
-            long_term_search=long_term_search,
-        )
-
-        # Make the API call
-        response = await self._client.post(
-            "/v1/memory/prompt", json=payload.model_dump(exclude_none=True, mode="json")
-        )
-        response.raise_for_status()
-        data = response.json()
-        return MemoryPromptResponse(**data)
-
-    async def hydrate_memory_prompt(
-        self,
-        query: str,
-        session_id: SessionId | dict[str, Any] | None = None,
-        namespace: Namespace | dict[str, Any] | None = None,
-        topics: Topics | dict[str, Any] | None = None,
-        entities: Entities | dict[str, Any] | None = None,
-        created_at: CreatedAt | dict[str, Any] | None = None,
-        last_accessed: LastAccessed | dict[str, Any] | None = None,
-        user_id: UserId | dict[str, Any] | None = None,
-        distance_threshold: float | None = None,
-        memory_type: MemoryType | dict[str, Any] | None = None,
-        limit: int = 10,
-        offset: int = 0,
-        window_size: int = 12,
-        model_name: ModelNameLiteral | None = None,
-        context_window_max: int | None = None,
-    ) -> MemoryPromptResponse:
-        """
-        Hydrate a user query with relevant session history and long-term memories.
-
-        This method enriches the user's query by retrieving:
-        1. Context from the conversation session (if session_id is provided)
-        2. Relevant long-term memories related to the query
-
-        Args:
-            query: The user's query text
-            session_id: Optional filter for session ID
-            namespace: Optional filter for namespace
-            topics: Optional filter for topics in long-term memories
-            entities: Optional filter for entities in long-term memories
-            created_at: Optional filter for creation date
-            last_accessed: Optional filter for last access date
-            user_id: Optional filter for user ID
-            distance_threshold: Optional distance threshold for semantic search
-            memory_type: Optional filter for memory type
-            limit: Maximum number of long-term memory results (default: 10)
-            offset: Offset for pagination (default: 0)
-            window_size: Number of messages to include from session history (default: 12)
-            model_name: Optional model name to determine context window size
-            context_window_max: Optional direct specification of context window max tokens
-
-        Returns:
-            MemoryPromptResponse containing a list of messages with context
-
-        Raises:
-            httpx.HTTPStatusError: If the request fails
-        """
-        # Convert dictionary filters to their proper filter objects if needed
-        if isinstance(session_id, dict):
-            session_id = SessionId(**session_id)
-        if isinstance(namespace, dict):
-            namespace = Namespace(**namespace)
-        if isinstance(topics, dict):
-            topics = Topics(**topics)
-        if isinstance(entities, dict):
-            entities = Entities(**entities)
-        if isinstance(created_at, dict):
-            created_at = CreatedAt(**created_at)
-        if isinstance(last_accessed, dict):
-            last_accessed = LastAccessed(**last_accessed)
-        if isinstance(user_id, dict):
-            user_id = UserId(**user_id)
-        if isinstance(memory_type, dict):
-            memory_type = MemoryType(**memory_type)
-
-        # Apply default namespace if needed and no namespace filter specified
-        if namespace is None and self.config.default_namespace is not None:
-            namespace = Namespace(eq=self.config.default_namespace)
-
-        # Extract session_id value if it exists
-        session_params = None
-        _session_id = None
-        if session_id and hasattr(session_id, "eq") and session_id.eq:
-            _session_id = session_id.eq
-
-        if _session_id:
-            # Get namespace value if it exists
-            _namespace = None
-            if namespace and hasattr(namespace, "eq"):
-                _namespace = namespace.eq
-            elif self.config.default_namespace:
-                _namespace = self.config.default_namespace
-
-            session_params = WorkingMemoryRequest(
-                session_id=_session_id,
-                namespace=_namespace,
-                window_size=window_size,
-                model_name=model_name,
-                context_window_max=context_window_max,
+        try:
+            response = await self._client.post(
+                "/v1/memory/search",
+                json=payload,
             )
-
-        # Create search request for long-term memory
-        search_payload = SearchRequest(
-            text=query,
-            session_id=session_id,
-            namespace=namespace,
-            topics=topics,
-            entities=entities,
-            created_at=created_at,
-            last_accessed=last_accessed,
-            user_id=user_id,
-            distance_threshold=distance_threshold,
-            memory_type=memory_type,
-            limit=limit,
-            offset=offset,
-        )
-
-        # Create the request payload
-        payload = MemoryPromptRequest(
-            query=query,
-            session=session_params,
-            long_term_search=search_payload,
-        )
-
-        # Make the API call
-        response = await self._client.post(
-            "/v1/memory/prompt", json=payload.model_dump(exclude_none=True, mode="json")
-        )
-        response.raise_for_status()
-        data = response.json()
-        return MemoryPromptResponse(**data)
+            response.raise_for_status()
+            return MemoryRecordResults(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
 
     # === Memory Lifecycle Management ===
 
@@ -977,8 +836,6 @@ class MemoryAPIClient:
 
             offset += batch_size
 
-    # === Client-Side Validation ===
-
     def validate_memory_record(self, memory: ClientMemoryRecord | MemoryRecord) -> None:
         """
         Validate memory record before sending to server.
@@ -991,46 +848,26 @@ class MemoryAPIClient:
         - ID format is valid
 
         Raises:
-            ValueError: If validation fails with descriptive message
+            MemoryValidationError: If validation fails with descriptive message
         """
         if not memory.text or not memory.text.strip():
-            raise ValueError("Memory text cannot be empty")
+            raise MemoryValidationError("Memory text cannot be empty")
 
         if memory.memory_type not in [
             "episodic",
             "semantic",
             "message",
         ]:
-            raise ValueError(f"Invalid memory type: {memory.memory_type}")
+            raise MemoryValidationError(f"Invalid memory type: {memory.memory_type}")
 
         if memory.id and not self._is_valid_ulid(memory.id):
-            raise ValueError(f"Invalid ID format: {memory.id}")
+            raise MemoryValidationError(f"Invalid ID format: {memory.id}")
 
-        if (
-            hasattr(memory, "created_at")
-            and memory.created_at
-            and not isinstance(memory.created_at, datetime)
-        ):
-            try:
-                datetime.fromisoformat(str(memory.created_at))
-            except ValueError as e:
-                raise ValueError(
-                    f"Invalid created_at format: {memory.created_at}"
-                ) from e
+        # created_at is validated by Pydantic
 
-        if (
-            hasattr(memory, "last_accessed")
-            and memory.last_accessed
-            and not isinstance(memory.last_accessed, datetime)
-        ):
-            try:
-                datetime.fromisoformat(str(memory.last_accessed))
-            except ValueError as e:
-                raise ValueError(
-                    f"Invalid last_accessed format: {memory.last_accessed}"
-                ) from e
+        # last_accessed is validated by Pydantic
 
-    def validate_search_filters(self, **filters) -> None:
+    def validate_search_filters(self, **filters: Any) -> None:
         """Validate search filter parameters before API call."""
         valid_filter_keys = {
             "session_id",
@@ -1048,33 +885,31 @@ class MemoryAPIClient:
 
         for key in filters:
             if key not in valid_filter_keys:
-                raise ValueError(f"Invalid filter key: {key}")
+                raise MemoryValidationError(f"Invalid filter key: {key}")
 
         if "limit" in filters and (
             not isinstance(filters["limit"], int) or filters["limit"] <= 0
         ):
-            raise ValueError("Limit must be a positive integer")
+            raise MemoryValidationError("Limit must be a positive integer")
 
         if "offset" in filters and (
             not isinstance(filters["offset"], int) or filters["offset"] < 0
         ):
-            raise ValueError("Offset must be a non-negative integer")
+            raise MemoryValidationError("Offset must be a non-negative integer")
 
         if "distance_threshold" in filters and (
             not isinstance(filters["distance_threshold"], int | float)
             or filters["distance_threshold"] < 0
         ):
-            raise ValueError("Distance threshold must be a non-negative number")
+            raise MemoryValidationError(
+                "Distance threshold must be a non-negative number"
+            )
+
+    _ULID_REGEX = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 
     def _is_valid_ulid(self, ulid_str: str) -> bool:
-        """Check if a string is a valid ULID format."""
-        try:
-            ULID.from_str(ulid_str)
-            return True
-        except ValueError:
-            return False
-
-    # === Enhanced Convenience Methods ===
+        """Return True if a string looks like a valid Crockford-base32 ULID."""
+        return bool(self._ULID_REGEX.fullmatch(ulid_str))
 
     async def update_working_memory_data(
         self,
@@ -1111,7 +946,7 @@ class MemoryAPIClient:
             elif merge_strategy == "deep_merge":
                 final_data = self._deep_merge_dicts(existing_memory.data, data_updates)
             else:
-                raise ValueError(f"Invalid merge strategy: {merge_strategy}")
+                raise MemoryValidationError(f"Invalid merge strategy: {merge_strategy}")
         else:
             final_data = data_updates
 
@@ -1156,10 +991,35 @@ class MemoryAPIClient:
                 session_id=session_id, namespace=namespace
             )
 
-        # Combine messages
-        final_messages = (
-            existing_memory.messages if existing_memory else []
-        ) + messages
+        # Combine messages - convert MemoryMessage objects to dicts if needed
+        existing_messages = existing_memory.messages if existing_memory else []
+
+        # Convert existing messages to dict format if they're objects
+        converted_existing_messages = []
+        for msg in existing_messages:
+            if hasattr(msg, "model_dump"):
+                converted_existing_messages.append(msg.model_dump())
+            elif hasattr(msg, "role") and hasattr(msg, "content"):
+                converted_existing_messages.append(
+                    {"role": msg.role, "content": msg.content}
+                )
+            else:
+                # Fallback for any other message type
+                converted_existing_messages.append(
+                    {"role": "user", "content": str(msg)}
+                )
+
+        # Convert new messages to dict format if they're objects
+        new_messages = []
+        for msg in messages:
+            if hasattr(msg, "model_dump"):
+                new_messages.append(msg.model_dump())
+            elif hasattr(msg, "role") and hasattr(msg, "content"):
+                new_messages.append({"role": msg.role, "content": msg.content})
+            else:
+                new_messages.append(msg)
+
+        final_messages = converted_existing_messages + new_messages
 
         # Create updated working memory
         working_memory = WorkingMemory(
@@ -1174,7 +1034,134 @@ class MemoryAPIClient:
 
         return await self.put_session_memory(session_id, working_memory)
 
-    def _deep_merge_dicts(self, base: dict, updates: dict) -> dict:
+    async def memory_prompt(
+        self,
+        query: str,
+        session_id: str | None = None,
+        namespace: str | None = None,
+        window_size: int | None = None,
+        model_name: str | None = None,
+        context_window_max: int | None = None,
+        long_term_search: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Hydrate a user query with memory context and return a prompt ready to send to an LLM.
+
+        Args:
+            query: The input text to find relevant context for
+            session_id: Optional session ID to include session messages
+            namespace: Optional namespace for the session
+            window_size: Optional number of messages to include
+            model_name: Optional model name to determine context window size
+            context_window_max: Optional direct specification of context window tokens
+            long_term_search: Optional search parameters for long-term memory
+
+        Returns:
+            Dict with messages hydrated with relevant memory context
+        """
+        payload: dict[str, Any] = {"query": query}
+
+        # Add session parameters if provided
+        if session_id is not None:
+            session_params: dict[str, Any] = {"session_id": session_id}
+            if namespace is not None:
+                session_params["namespace"] = namespace
+            elif self.config.default_namespace is not None:
+                session_params["namespace"] = self.config.default_namespace
+            if window_size is not None:
+                session_params["window_size"] = str(window_size)
+            if model_name is not None:
+                session_params["model_name"] = model_name
+            if context_window_max is not None:
+                session_params["context_window_max"] = str(context_window_max)
+            payload["session"] = session_params
+
+        # Add long-term search parameters if provided
+        if long_term_search is not None:
+            payload["long_term_search"] = long_term_search
+
+        try:
+            response = await self._client.post(
+                "/v1/memory/prompt",
+                json=payload,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if isinstance(result, dict):
+                return result
+            return {"response": result}
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
+
+    async def hydrate_memory_prompt(
+        self,
+        query: str,
+        session_id: dict[str, Any] | None = None,
+        namespace: dict[str, Any] | None = None,
+        topics: dict[str, Any] | None = None,
+        entities: dict[str, Any] | None = None,
+        created_at: dict[str, Any] | None = None,
+        last_accessed: dict[str, Any] | None = None,
+        user_id: dict[str, Any] | None = None,
+        distance_threshold: float | None = None,
+        memory_type: dict[str, Any] | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Hydrate a user query with long-term memory context using filters.
+
+        This is a convenience method that creates a memory prompt using only
+        long-term memory search with the specified filters.
+
+        Args:
+            query: The input text to find relevant context for
+            session_id: Optional session ID filter (as dict)
+            namespace: Optional namespace filter (as dict)
+            topics: Optional topics filter (as dict)
+            entities: Optional entities filter (as dict)
+            created_at: Optional creation date filter (as dict)
+            last_accessed: Optional last accessed date filter (as dict)
+            user_id: Optional user ID filter (as dict)
+            distance_threshold: Optional distance threshold
+            memory_type: Optional memory type filter (as dict)
+            limit: Maximum number of long-term memories to include
+
+        Returns:
+            Dict with messages hydrated with relevant long-term memories
+        """
+        # Build long-term search parameters
+        long_term_search: dict[str, Any] = {"limit": limit}
+
+        if session_id is not None:
+            long_term_search["session_id"] = session_id
+        if namespace is not None:
+            long_term_search["namespace"] = namespace
+        elif self.config.default_namespace is not None:
+            long_term_search["namespace"] = {"eq": self.config.default_namespace}
+        if topics is not None:
+            long_term_search["topics"] = topics
+        if entities is not None:
+            long_term_search["entities"] = entities
+        if created_at is not None:
+            long_term_search["created_at"] = created_at
+        if last_accessed is not None:
+            long_term_search["last_accessed"] = last_accessed
+        if user_id is not None:
+            long_term_search["user_id"] = user_id
+        if distance_threshold is not None:
+            long_term_search["distance_threshold"] = distance_threshold
+        if memory_type is not None:
+            long_term_search["memory_type"] = memory_type
+
+        return await self.memory_prompt(
+            query=query,
+            long_term_search=long_term_search,
+        )
+
+    def _deep_merge_dicts(
+        self, base: dict[str, Any], updates: dict[str, Any]
+    ) -> dict[str, Any]:
         """Recursively merge two dictionaries."""
         result = base.copy()
         for key, value in updates.items():
@@ -1203,6 +1190,9 @@ async def create_memory_client(
 
     Returns:
         Initialized MemoryAPIClient instance
+
+    Raises:
+        MemoryClientError: If unable to connect to the server
     """
     config = MemoryClientConfig(
         base_url=base_url,
@@ -1216,7 +1206,7 @@ async def create_memory_client(
         await client.health_check()
     except Exception as e:
         await client.close()
-        raise ConnectionError(
+        raise MemoryClientError(
             f"Failed to connect to memory server at {base_url}: {e}"
         ) from e
 
