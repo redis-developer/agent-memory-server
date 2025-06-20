@@ -8,7 +8,7 @@ A Redis-powered memory server built for AI agents and applications. It manages b
 
   - Session-scoped storage for messages, structured memories, context, and metadata
   - Automatically summarizes conversations when they exceed the window size
-  - Client model-aware token limit management (adapts to the context window of the client's LLM)
+  - Token limit management (adapts to the context window of the client's LLM)
   - Supports all major OpenAI and Anthropic models
   - Automatic promotion of structured memories to long-term storage
 
