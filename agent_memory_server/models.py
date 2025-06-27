@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal
 
-import ulid
 from mcp.server.fastmcp.prompts import base
 from pydantic import BaseModel, Field
+from ulid import ULID
 
 from agent_memory_server.config import settings
 from agent_memory_server.filters import (
@@ -143,7 +143,7 @@ class ClientMemoryRecord(MemoryRecord):
     """A memory record with a client-provided ID"""
 
     id: str = Field(
-        default_factory=lambda: str(ulid.ULID()),
+        default_factory=lambda: str(ULID()),
         description="Client-provided ID for deduplication and overwrites",
     )
 
@@ -380,3 +380,9 @@ class UserMessage(base.Message):
 
 class MemoryPromptResponse(BaseModel):
     messages: list[base.Message | SystemMessage]
+
+
+class LenientMemoryRecord(MemoryRecord):
+    """A memory record that can be created without an ID"""
+
+    id: str | None = Field(default_factory=lambda: str(ULID()))

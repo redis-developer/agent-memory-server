@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP as _FastMCPBase
 
 from agent_memory_server.api import (
     create_long_term_memory as core_create_long_term_memory,
+    get_working_memory as core_get_working_memory,
     memory_prompt as core_memory_prompt,
     put_working_memory as core_put_working_memory,
     search_long_term_memory as core_search_long_term_memory,
@@ -26,6 +27,7 @@ from agent_memory_server.filters import (
 from agent_memory_server.models import (
     AckResponse,
     CreateMemoryRecordRequest,
+    LenientMemoryRecord,
     MemoryMessage,
     MemoryPromptRequest,
     MemoryPromptResponse,
@@ -169,7 +171,7 @@ mcp_app = FastMCP(
 
 @mcp_app.tool()
 async def create_long_term_memories(
-    memories: list[MemoryRecord],
+    memories: list[LenientMemoryRecord],
 ) -> AckResponse:
     """
     Create long-term memories that can be searched later.
@@ -304,7 +306,9 @@ async def create_long_term_memories(
             if mem.namespace is None:
                 mem.namespace = DEFAULT_NAMESPACE
 
-    payload = CreateMemoryRecordRequest(memories=memories)
+    payload = CreateMemoryRecordRequest(
+        memories=[MemoryRecord(**mem.model_dump()) for mem in memories]
+    )
     return await core_create_long_term_memory(
         payload, background_tasks=get_background_tasks()
     )
@@ -594,7 +598,7 @@ async def memory_prompt(
 @mcp_app.tool()
 async def set_working_memory(
     session_id: str,
-    memories: list[MemoryRecord] | None = None,
+    memories: list[LenientMemoryRecord] | None = None,
     messages: list[MemoryMessage] | None = None,
     context: str | None = None,
     data: dict[str, Any] | None = None,
@@ -729,3 +733,13 @@ async def set_working_memory(
 
     # Convert to WorkingMemoryResponse to satisfy return type
     return WorkingMemoryResponse(**result.model_dump())
+
+
+@mcp_app.tool()
+async def get_working_memory(
+    session_id: str,
+) -> WorkingMemory:
+    """
+    Get working memory for a session. This works like the GET /sessions/{id}/memory API endpoint.
+    """
+    return await core_get_working_memory(session_id=session_id)

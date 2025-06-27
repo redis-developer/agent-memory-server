@@ -1,8 +1,8 @@
 import tiktoken
-import ulid
 from fastapi import APIRouter, Depends, HTTPException
 from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
+from ulid import ULID
 
 from agent_memory_server import long_term_memory, working_memory
 from agent_memory_server.auth import UserInfo, get_current_user
@@ -344,7 +344,7 @@ async def put_working_memory(
 
             memories = [
                 MemoryRecord(
-                    id=str(ulid.ULID()),
+                    id=str(ULID()),
                     session_id=session_id,
                     text=f"{msg.role}: {msg.content}",
                     namespace=updated_memory.namespace,
@@ -449,13 +449,10 @@ async def search_long_term_memory(
     if not settings.long_term_memory:
         raise HTTPException(status_code=400, detail="Long-term memory is disabled")
 
-    redis = await get_redis_conn()
-
     # Extract filter objects from the payload
     filters = payload.get_filters()
 
     kwargs = {
-        "redis": redis,
         "distance_threshold": payload.distance_threshold,
         "limit": payload.limit,
         "offset": payload.offset,
@@ -465,7 +462,7 @@ async def search_long_term_memory(
     if payload.text:
         kwargs["text"] = payload.text
 
-    # Pass text, redis, and filter objects to the search function
+    # Pass text and filter objects to the search function (no redis needed for vectorstore adapter)
     return await long_term_memory.search_long_term_memories(**kwargs)
 
 
@@ -632,6 +629,16 @@ async def memory_prompt(
                     content=TextContent(
                         type="text",
                         text=f"## Long term memories related to the user's query\n {long_term_memories_text}",
+                    ),
+                )
+            )
+        else:
+            # Always include a system message about long-term memories, even if empty
+            _messages.append(
+                SystemMessage(
+                    content=TextContent(
+                        type="text",
+                        text="## Long term memories related to the user's query\n No relevant long-term memories found.",
                     ),
                 )
             )

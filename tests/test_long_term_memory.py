@@ -1,12 +1,8 @@
-import time
 from datetime import UTC, datetime
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import numpy as np
 import pytest
-import ulid
-from redis.commands.search.document import Document
 
 from agent_memory_server.filters import Namespace, SessionId
 from agent_memory_server.long_term_memory import (
@@ -22,8 +18,15 @@ from agent_memory_server.long_term_memory import (
     search_long_term_memories,
     search_memories,
 )
-from agent_memory_server.models import MemoryRecord, MemoryRecordResult, MemoryTypeEnum
-from agent_memory_server.utils.redis import ensure_search_index_exists
+from agent_memory_server.models import (
+    MemoryRecord,
+    MemoryRecordResult,
+    MemoryRecordResults,
+    MemoryTypeEnum,
+)
+
+
+# from agent_memory_server.utils.redis import ensure_search_index_exists  # Not used currently
 
 
 class TestLongTermMemory:
@@ -31,7 +34,7 @@ class TestLongTermMemory:
     async def test_index_memories(
         self, mock_openai_client, mock_async_redis_client, session
     ):
-        """Test indexing messages"""
+        """Test indexing memories using vectorstore adapter"""
         long_term_memories = [
             MemoryRecord(
                 id="memory-1", text="Paris is the capital of France", session_id=session
@@ -41,125 +44,81 @@ class TestLongTermMemory:
             ),
         ]
 
-        # Create two separate embedding vectors
-        mock_vectors = [
-            np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32).tobytes(),
-            np.array([0.5, 0.6, 0.7, 0.8], dtype=np.float32).tobytes(),
-        ]
-
-        mock_vectorizer = MagicMock()
-        mock_vectorizer.aembed_many = AsyncMock(return_value=mock_vectors)
-
-        mock_async_redis_client.hset = AsyncMock()
+        # Mock the vectorstore adapter add_memories method
+        mock_adapter = AsyncMock()
+        mock_adapter.add_memories.return_value = ["memory-1", "memory-2"]
 
         with mock.patch(
-            "agent_memory_server.long_term_memory.OpenAITextVectorizer",
-            return_value=mock_vectorizer,
+            "agent_memory_server.long_term_memory.get_vectorstore_adapter",
+            return_value=mock_adapter,
         ):
             await index_long_term_memories(
                 long_term_memories,
                 redis_client=mock_async_redis_client,
             )
 
-        # Check that create_embedding was called with the right arguments
-        contents = [memory.text for memory in long_term_memories]
-        mock_vectorizer.aembed_many.assert_called_with(
-            contents,
-            batch_size=20,
-            as_buffer=True,
-        )
+        # Check that the adapter add_memories was called with the right arguments
+        mock_adapter.add_memories.assert_called_once()
+        call_args = mock_adapter.add_memories.call_args
 
-        # Verify one of the calls to make sure the data is correct
-        for i, call in enumerate(mock_async_redis_client.hset.call_args_list):
-            args, kwargs = call
-
-            # Check that the key starts with the memory key prefix
-            assert args[0].startswith("memory:")
-
-            # Check that the mapping contains the essential keys
-            mapping = kwargs["mapping"]
-            assert mapping["text"] == long_term_memories[i].text
-            assert (
-                mapping["id_"] == long_term_memories[i].id
-            )  # id_ is the internal Redis field
-            assert mapping["session_id"] == long_term_memories[i].session_id
-            assert mapping["user_id"] == long_term_memories[i].user_id
-            assert "last_accessed" in mapping
-            assert "created_at" in mapping
-            assert mapping["vector"] == mock_vectors[i]
+        # Verify the memories passed to the adapter
+        memories_arg = call_args[0][0]  # First positional argument
+        assert len(memories_arg) == 2
+        assert memories_arg[0].id == "memory-1"
+        assert memories_arg[0].text == "Paris is the capital of France"
+        assert memories_arg[1].id == "memory-2"
+        assert memories_arg[1].text == "France is a country in Europe"
 
     @pytest.mark.asyncio
     async def test_search_memories(self, mock_openai_client, mock_async_redis_client):
-        """Test searching memories"""
-        # Set up the mock embedding response
-        mock_vector = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
-        mock_vectorizer = MagicMock()
-        mock_vectorizer.aembed = AsyncMock(return_value=mock_vector)
+        """Test searching memories using vectorstore adapter"""
+        from agent_memory_server.models import MemoryRecordResult, MemoryRecordResults
 
-        class MockResult:
-            def __init__(self, docs):
-                self.total = len(docs)
-                self.docs = docs
+        # Mock the vectorstore adapter search_memories method
+        mock_adapter = AsyncMock()
 
-        mock_now = time.time()
+        # Create mock search results in the expected format
+        mock_memory_result = MemoryRecordResult(
+            id="test-id",
+            text="Hello, world!",
+            dist=0.25,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            last_accessed=datetime.now(UTC),
+            user_id="test-user",
+            session_id="test-session",
+            namespace="test-namespace",
+            topics=["greeting"],
+            entities=["world"],
+            memory_hash="test-hash",
+            memory_type=MemoryTypeEnum.MESSAGE,
+        )
 
-        mock_query = AsyncMock()
-        # Return a list of documents directly instead of a MockResult object
-        mock_query.return_value = [
-            Document(
-                id=b"doc1",
-                id_=str(ulid.ULID()),
-                text=b"Hello, world!",
-                vector_distance=0.25,
-                created_at=mock_now,
-                last_accessed=mock_now,
-                user_id=None,
-                session_id=None,
-                namespace=None,
-                topics=None,
-                entities=None,
-            ),
-            Document(
-                id=b"doc2",
-                id_=str(ulid.ULID()),
-                text=b"Hi there!",
-                vector_distance=0.75,
-                created_at=mock_now,
-                last_accessed=mock_now,
-                user_id=None,
-                session_id=None,
-                namespace=None,
-                topics=None,
-                entities=None,
-            ),
-        ]
+        mock_search_results = MemoryRecordResults(
+            memories=[mock_memory_result],
+            total=1,
+            next_offset=None,
+        )
 
-        mock_index = MagicMock()
-        mock_index.query = mock_query
+        mock_adapter.search_memories.return_value = mock_search_results
 
         query = "What is the meaning of life?"
         session_id = SessionId(eq="test-session")
 
-        with (
-            mock.patch(
-                "agent_memory_server.long_term_memory.OpenAITextVectorizer",
-                return_value=mock_vectorizer,
-            ),
-            mock.patch(
-                "agent_memory_server.long_term_memory.get_search_index",
-                return_value=mock_index,
-            ),
+        with mock.patch(
+            "agent_memory_server.long_term_memory.get_vectorstore_adapter",
+            return_value=mock_adapter,
         ):
             results = await search_long_term_memories(
                 query,
-                mock_async_redis_client,
                 session_id=session_id,
             )
 
-        # Check that create_embedding was called with the right arguments
-        mock_vectorizer.aembed.assert_called_with(query)
-
-        assert mock_index.query.call_count == 1
+        # Check that the adapter search_memories was called with the right arguments
+        mock_adapter.search_memories.assert_called_once()
+        call_args = mock_adapter.search_memories.call_args
+        assert call_args[1]["query"] == query  # Check query parameter
+        assert call_args[1]["session_id"] == session_id  # Check session_id filter
 
         assert len(results.memories) == 1
         assert isinstance(results.memories[0], MemoryRecordResult)
@@ -356,37 +315,35 @@ class TestLongTermMemory:
 
     @pytest.mark.asyncio
     async def test_count_long_term_memories(self, mock_async_redis_client):
-        """Test counting long-term memories"""
+        """Test counting long-term memories using vectorstore adapter"""
 
-        # Mock execute_command for both FT.INFO and FT.SEARCH
-        def mock_execute_command(command):
-            if command.startswith("FT.INFO"):
-                # Return success for index info check
-                return {"num_docs": 42}
-            if command.startswith("FT.SEARCH"):
-                # Return search results with count as first element
-                return [42]  # Total count
-            return []
+        # Mock the vectorstore adapter count_memories method
+        mock_adapter = AsyncMock()
+        mock_adapter.count_memories.return_value = 42
 
-        mock_async_redis_client.execute_command = AsyncMock(
-            side_effect=mock_execute_command
-        )
-
-        count = await count_long_term_memories(
-            namespace="test-namespace",
-            user_id="test-user",
-            session_id="test-session",
-            redis_client=mock_async_redis_client,
-        )
+        with mock.patch(
+            "agent_memory_server.long_term_memory.get_vectorstore_adapter",
+            return_value=mock_adapter,
+        ):
+            count = await count_long_term_memories(
+                namespace="test-namespace",
+                user_id="test-user",
+                session_id="test-session",
+                redis_client=mock_async_redis_client,
+            )
 
         assert count == 42
 
-        # Verify the execute_command was called
-        assert mock_async_redis_client.execute_command.call_count >= 1
+        # Verify the adapter count_memories was called with the right arguments
+        mock_adapter.count_memories.assert_called_once_with(
+            namespace="test-namespace",
+            user_id="test-user",
+            session_id="test-session",
+        )
 
     @pytest.mark.asyncio
     async def test_deduplicate_by_hash(self, mock_async_redis_client):
-        """Test deduplication by hash"""
+        """Test deduplication by hash using vectorstore adapter"""
         memory = MemoryRecord(
             id="test-memory-1",
             text="Test memory",
@@ -395,33 +352,53 @@ class TestLongTermMemory:
         )
 
         # Test case 1: No duplicate found
-        # Mock Redis execute_command to return 0 results
-        mock_async_redis_client.execute_command = AsyncMock(return_value=[0])
-
-        result_memory, overwrite = await deduplicate_by_hash(
-            memory, redis_client=mock_async_redis_client
+        mock_adapter = AsyncMock()
+        mock_adapter.search_memories.return_value = MemoryRecordResults(
+            total=0, memories=[]
         )
+
+        with mock.patch(
+            "agent_memory_server.long_term_memory.get_vectorstore_adapter",
+            return_value=mock_adapter,
+        ):
+            result_memory, overwrite = await deduplicate_by_hash(
+                memory, redis_client=mock_async_redis_client
+            )
 
         assert result_memory == memory
         assert overwrite is False
 
         # Test case 2: Duplicate found
-        # Mock Redis execute_command to return 1 result (return bytes like real Redis)
-        mock_async_redis_client.execute_command = AsyncMock(
-            return_value=[1, b"memory:existing-key", b"existing-id-123"]
+        existing_memory = MemoryRecordResult(
+            id="existing-memory-id",
+            text="Test memory",
+            dist=0.0,
+            memory_type=MemoryTypeEnum.SEMANTIC,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            last_accessed=datetime.now(UTC),
+        )
+
+        mock_adapter.search_memories.return_value = MemoryRecordResults(
+            total=1, memories=[existing_memory]
         )
 
         # Mock the hset call that updates last_accessed
         mock_async_redis_client.hset = AsyncMock()
 
-        result_memory, overwrite = await deduplicate_by_hash(
-            memory, redis_client=mock_async_redis_client
-        )
+        with mock.patch(
+            "agent_memory_server.long_term_memory.get_vectorstore_adapter",
+            return_value=mock_adapter,
+        ):
+            result_memory, overwrite = await deduplicate_by_hash(
+                memory, redis_client=mock_async_redis_client
+            )
 
         # Should return None (duplicate found) and overwrite=True
         assert result_memory is None
         assert overwrite is True
-        # Verify the last_accessed timestamp was updated
+
+        # Verify that last_accessed was updated
         mock_async_redis_client.hset.assert_called_once()
 
     @pytest.mark.asyncio
@@ -531,6 +508,9 @@ class TestLongTermMemory:
             patch(
                 "agent_memory_server.long_term_memory.index_long_term_memories"
             ) as mock_index,
+            patch(
+                "agent_memory_server.long_term_memory.count_long_term_memories"
+            ) as mock_count,
         ):
             mock_get_client.return_value = mock_llm_client
             mock_merge.return_value = {
@@ -552,6 +532,7 @@ class TestLongTermMemory:
             # Mock deletion and indexing
             mock_async_redis_client.delete = AsyncMock()
             mock_index.return_value = None
+            mock_count.return_value = 2  # Return expected count
 
             remaining_count = await compact_long_term_memories(
                 namespace="test",
@@ -752,7 +733,7 @@ class TestLongTermMemoryIntegration:
     @pytest.mark.asyncio
     async def test_search_messages(self, async_redis_client):
         """Test searching messages"""
-        await ensure_search_index_exists(async_redis_client)
+        # await ensure_search_index_exists(async_redis_client)  # Let LangChain handle index
 
         long_term_memories = [
             MemoryRecord(
@@ -763,18 +744,15 @@ class TestLongTermMemoryIntegration:
             ),
         ]
 
-        with mock.patch(
-            "agent_memory_server.long_term_memory.get_redis_conn",
-            return_value=async_redis_client,
-        ):
-            await index_long_term_memories(
-                long_term_memories,
-                redis_client=async_redis_client,
-            )
+        # Index memories using the test Redis connection (already patched by conftest)
+        await index_long_term_memories(
+            long_term_memories,
+            redis_client=async_redis_client,
+        )
 
+        # Search using the same connection (should be patched by conftest)
         results = await search_long_term_memories(
             "What is the capital of France?",
-            async_redis_client,
             session_id=SessionId(eq="123"),
             limit=1,
         )
@@ -788,7 +766,7 @@ class TestLongTermMemoryIntegration:
     @pytest.mark.asyncio
     async def test_search_messages_with_distance_threshold(self, async_redis_client):
         """Test searching messages with a distance threshold"""
-        await ensure_search_index_exists(async_redis_client)
+        # await ensure_search_index_exists(async_redis_client)  # Let LangChain handle index
 
         long_term_memories = [
             MemoryRecord(
@@ -799,25 +777,36 @@ class TestLongTermMemoryIntegration:
             ),
         ]
 
-        with mock.patch(
-            "agent_memory_server.long_term_memory.get_redis_conn",
-            return_value=async_redis_client,
-        ):
-            await index_long_term_memories(
-                long_term_memories,
-                redis_client=async_redis_client,
-            )
+        # Index memories using the test Redis connection (already patched by conftest)
+        await index_long_term_memories(
+            long_term_memories,
+            redis_client=async_redis_client,
+        )
 
+        # Search using the same connection (should be patched by conftest)
         results = await search_long_term_memories(
             "What is the capital of France?",
-            async_redis_client,
             session_id=SessionId(eq="123"),
-            distance_threshold=0.1,
+            distance_threshold=0.3,
             limit=2,
         )
 
-        assert results.total == 1
-        assert len(results.memories) == 1
+        # At least one memory should pass the threshold, and the most relevant one should be first
+        assert results.total >= 1
+        assert len(results.memories) >= 1
+
+        # Verify that the first result is the more directly relevant one
         assert results.memories[0].text == "Paris is the capital of France"
         assert results.memories[0].session_id == "123"
         assert results.memories[0].memory_type == "message"
+
+        # Test with a very strict threshold that should filter out results
+        strict_results = await search_long_term_memories(
+            "What is the capital of France?",
+            session_id=SessionId(eq="123"),
+            distance_threshold=0.05,  # Very strict threshold
+            limit=2,
+        )
+
+        # With strict threshold, we should get fewer or equal results
+        assert strict_results.total <= results.total

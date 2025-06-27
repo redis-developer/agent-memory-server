@@ -56,7 +56,7 @@ class TestMCP:
             )
             assert isinstance(results, CallToolResult)
             assert results.content[0].type == "text"
-            assert results.content[0].text == '{"status": "ok"}'
+            assert results.content[0].text == '{\n  "status": "ok"\n}'
 
     @pytest.mark.asyncio
     async def test_search_memory(self, session, mcp_test_setup):
