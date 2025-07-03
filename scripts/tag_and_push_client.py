@@ -76,9 +76,9 @@ def tag_exists(tag_name: str) -> bool:
     try:
         subprocess.run(
             ["git", "rev-parse", f"refs/tags/{tag_name}"],
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             check=True,
-            stderr=subprocess.DEVNULL,  # Suppress stderr since we expect this to fail for non-existent tags
         )
         return True
     except subprocess.CalledProcessError:
