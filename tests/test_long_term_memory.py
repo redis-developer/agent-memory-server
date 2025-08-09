@@ -112,6 +112,7 @@ class TestLongTermMemory:
             results = await search_long_term_memories(
                 query,
                 session_id=session_id,
+                optimize_query=False,  # Disable query optimization for this unit test
             )
 
         # Check that the adapter search_memories was called with the right arguments
@@ -882,3 +883,183 @@ class TestLongTermMemoryIntegration:
 
             # Re-raise to see the full traceback
             raise
+
+
+@pytest.mark.asyncio
+class TestSearchQueryOptimization:
+    """Test query optimization in search_long_term_memories function."""
+
+    @patch("agent_memory_server.long_term_memory.get_vectorstore_adapter")
+    @patch("agent_memory_server.long_term_memory.optimize_query_for_vector_search")
+    async def test_search_with_query_optimization_enabled(
+        self, mock_optimize, mock_get_adapter
+    ):
+        """Test that query optimization is applied when optimize_query=True."""
+        # Mock the vectorstore adapter
+        mock_adapter = AsyncMock()
+        mock_adapter.search_memories.return_value = MemoryRecordResults(
+            total=1,
+            memories=[
+                MemoryRecordResult(
+                    id="test-id",
+                    text="Test memory",
+                    memory_type=MemoryTypeEnum.SEMANTIC,
+                    dist=0.1,
+                )
+            ],
+        )
+        mock_get_adapter.return_value = mock_adapter
+
+        # Mock query optimization
+        mock_optimize.return_value = "optimized search query"
+
+        # Call search with optimization enabled
+        result = await search_long_term_memories(
+            text="tell me about my preferences", optimize_query=True, limit=10
+        )
+
+        # Verify optimization was called
+        mock_optimize.assert_called_once_with("tell me about my preferences")
+
+        # Verify adapter was called with optimized query
+        mock_adapter.search_memories.assert_called_once()
+        call_kwargs = mock_adapter.search_memories.call_args[1]
+        assert call_kwargs["query"] == "optimized search query"
+
+        # Verify results
+        assert result.total == 1
+        assert len(result.memories) == 1
+
+    @patch("agent_memory_server.long_term_memory.get_vectorstore_adapter")
+    @patch("agent_memory_server.long_term_memory.optimize_query_for_vector_search")
+    async def test_search_with_query_optimization_disabled(
+        self, mock_optimize, mock_get_adapter
+    ):
+        """Test that query optimization is skipped when optimize_query=False."""
+        # Mock the vectorstore adapter
+        mock_adapter = AsyncMock()
+        mock_adapter.search_memories.return_value = MemoryRecordResults(
+            total=1,
+            memories=[
+                MemoryRecordResult(
+                    id="test-id",
+                    text="Test memory",
+                    memory_type=MemoryTypeEnum.SEMANTIC,
+                    dist=0.1,
+                )
+            ],
+        )
+        mock_get_adapter.return_value = mock_adapter
+
+        # Call search with optimization disabled
+        result = await search_long_term_memories(
+            text="tell me about my preferences", optimize_query=False, limit=10
+        )
+
+        # Verify optimization was NOT called
+        mock_optimize.assert_not_called()
+
+        # Verify adapter was called with original query
+        mock_adapter.search_memories.assert_called_once()
+        call_kwargs = mock_adapter.search_memories.call_args[1]
+        assert call_kwargs["query"] == "tell me about my preferences"
+
+        # Verify results
+        assert result.total == 1
+        assert len(result.memories) == 1
+
+    @patch("agent_memory_server.long_term_memory.get_vectorstore_adapter")
+    @patch("agent_memory_server.long_term_memory.optimize_query_for_vector_search")
+    async def test_search_with_empty_query_skips_optimization(
+        self, mock_optimize, mock_get_adapter
+    ):
+        """Test that empty queries skip optimization."""
+        # Mock the vectorstore adapter
+        mock_adapter = AsyncMock()
+        mock_adapter.search_memories.return_value = MemoryRecordResults(
+            total=0, memories=[]
+        )
+        mock_get_adapter.return_value = mock_adapter
+
+        # Call search with empty query
+        await search_long_term_memories(text="", optimize_query=True, limit=10)
+
+        # Verify optimization was NOT called for empty query
+        mock_optimize.assert_not_called()
+
+        # Verify adapter was called with empty query
+        mock_adapter.search_memories.assert_called_once()
+        call_kwargs = mock_adapter.search_memories.call_args[1]
+        assert call_kwargs["query"] == ""
+
+    @patch("agent_memory_server.long_term_memory.get_vectorstore_adapter")
+    @patch("agent_memory_server.long_term_memory.optimize_query_for_vector_search")
+    async def test_search_optimization_failure_fallback(
+        self, mock_optimize, mock_get_adapter
+    ):
+        """Test that search continues with original query if optimization fails."""
+        # Mock the vectorstore adapter
+        mock_adapter = AsyncMock()
+        mock_adapter.search_memories.return_value = MemoryRecordResults(
+            total=0, memories=[]
+        )
+        mock_get_adapter.return_value = mock_adapter
+
+        # Mock optimization to return original query (simulating internal error handling)
+        mock_optimize.return_value = (
+            "test query"  # Returns original query after internal error handling
+        )
+
+        # Call search - this should not raise an exception
+        await search_long_term_memories(
+            text="test query", optimize_query=True, limit=10
+        )
+
+        # Verify optimization was attempted
+        mock_optimize.assert_called_once_with("test query")
+
+        # Verify search proceeded with the query (original after fallback)
+        mock_adapter.search_memories.assert_called_once()
+        call_kwargs = mock_adapter.search_memories.call_args[1]
+        assert call_kwargs["query"] == "test query"
+
+    @patch("agent_memory_server.long_term_memory.get_vectorstore_adapter")
+    @patch("agent_memory_server.long_term_memory.optimize_query_for_vector_search")
+    async def test_search_passes_all_parameters_correctly(
+        self, mock_optimize, mock_get_adapter
+    ):
+        """Test that all search parameters are passed correctly to the adapter."""
+        # Mock the vectorstore adapter
+        mock_adapter = AsyncMock()
+        mock_adapter.search_memories.return_value = MemoryRecordResults(
+            total=0, memories=[]
+        )
+        mock_get_adapter.return_value = mock_adapter
+
+        # Mock query optimization
+        mock_optimize.return_value = "optimized query"
+
+        # Create filter objects for testing
+        session_filter = SessionId(eq="test-session")
+
+        # Call search with various parameters
+        await search_long_term_memories(
+            text="test query",
+            session_id=session_filter,
+            limit=20,
+            offset=10,
+            distance_threshold=0.3,
+            optimize_query=True,
+        )
+
+        # Verify optimization was called
+        mock_optimize.assert_called_once_with("test query")
+
+        # Verify all parameters were passed to adapter
+        mock_adapter.search_memories.assert_called_once()
+        call_kwargs = mock_adapter.search_memories.call_args[1]
+        assert call_kwargs["query"] == "optimized query"
+        assert call_kwargs["session_id"] == session_filter
+        assert call_kwargs["limit"] == 20
+        assert call_kwargs["offset"] == 10
+        assert call_kwargs["distance_threshold"] == 0.3

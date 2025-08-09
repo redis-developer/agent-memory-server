@@ -330,13 +330,14 @@ async def search_long_term_memory(
     distance_threshold: float | None = None,
     limit: int = 10,
     offset: int = 0,
+    optimize_query: bool = False,
 ) -> MemoryRecordResults:
     """
-    Search for memories related to a text query.
+    Search for memories related to a query for vector search.
 
     Finds memories based on a combination of semantic similarity and input filters.
 
-    This tool performs a semantic search on stored memories using the query text and filters
+    This tool performs a semantic search on stored memories using the query for vector search and filters
     in the payload. Results are ranked by relevance.
 
     DATETIME INPUT FORMAT:
@@ -413,7 +414,7 @@ async def search_long_term_memory(
     ```
 
     Args:
-        text: The semantic search query text (required). Use empty string "" to get all memories for a user.
+        text: The query for vector search (required). Use empty string "" to get all memories for a user.
         session_id: Filter by session ID
         namespace: Filter by namespace
         topics: Filter by topics
@@ -425,6 +426,7 @@ async def search_long_term_memory(
         distance_threshold: Distance threshold for semantic search
         limit: Maximum number of results
         offset: Offset for pagination
+        optimize_query: Whether to optimize the query for vector search (default: False - LLMs typically provide already optimized queries)
 
     Returns:
         MemoryRecordResults containing matched memories sorted by relevance
@@ -449,7 +451,9 @@ async def search_long_term_memory(
             limit=limit,
             offset=offset,
         )
-        results = await core_search_long_term_memory(payload)
+        results = await core_search_long_term_memory(
+            payload, optimize_query=optimize_query
+        )
         results = MemoryRecordResults(
             total=results.total,
             memories=results.memories,
@@ -485,18 +489,19 @@ async def memory_prompt(
     distance_threshold: float | None = None,
     limit: int = 10,
     offset: int = 0,
+    optimize_query: bool = False,
 ) -> MemoryPromptResponse:
     """
-    Hydrate a user query with relevant session history and long-term memories.
+    Hydrate a query for vector search with relevant session history and long-term memories.
 
-    This tool enriches the user's query by retrieving:
+    This tool enriches the query by retrieving:
     1. Context from the current conversation session
     2. Relevant long-term memories related to the query
 
     The tool returns both the relevant memories AND the user's query in a format ready for
     generating comprehensive responses.
 
-    The function uses the query field from the payload as the user's query,
+    The function uses the query field as the query for vector search,
     and any filters to retrieve relevant memories.
 
     DATETIME INPUT FORMAT:
@@ -561,7 +566,7 @@ async def memory_prompt(
     ```
 
     Args:
-        - query: The user's query
+        - query: The query for vector search
         - session_id: Add conversation history from a working memory session
         - namespace: Filter session and long-term memory namespace
         - topics: Search for long-term memories matching topics
@@ -572,6 +577,7 @@ async def memory_prompt(
         - distance_threshold: Distance threshold for semantic search
         - limit: Maximum number of long-term memory results
         - offset: Offset for pagination of long-term memory results
+        - optimize_query: Whether to optimize the query for vector search (default: False - LLMs typically provide already optimized queries)
 
     Returns:
         A list of messages, including memory context and the user's query
@@ -611,7 +617,10 @@ async def memory_prompt(
     if search_payload is not None:
         _params["long_term_search"] = search_payload
 
-    return await core_memory_prompt(params=MemoryPromptRequest(query=query, **_params))
+    return await core_memory_prompt(
+        params=MemoryPromptRequest(query=query, **_params),
+        optimize_query=optimize_query,
+    )
 
 
 @mcp_app.tool()

@@ -487,3 +487,189 @@ async def test_memory_prompt_integration(memory_test_client: MemoryAPIClient):
         assert any("favorite color is blue" in text for text in message_texts)
         # And the query itself
         assert query in message_texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_search_long_term_memory_with_optimize_query_default_true(
+    memory_test_client: MemoryAPIClient,
+):
+    """Test that client search_long_term_memory uses optimize_query=True by default."""
+    with patch(
+        "agent_memory_server.long_term_memory.search_long_term_memories"
+    ) as mock_search:
+        mock_search.return_value = MemoryRecordResultsResponse(
+            total=1,
+            memories=[
+                MemoryRecordResult(
+                    id="test-1",
+                    text="User preferences about UI",
+                    memory_type=MemoryTypeEnum.SEMANTIC,
+                    dist=0.1,
+                )
+            ],
+            next_offset=None,
+        )
+
+        # Call search without optimize_query parameter (should default to True)
+        results = await memory_test_client.search_long_term_memory(
+            text="tell me about my preferences"
+        )
+
+        # Verify search was called with optimize_query=True (default)
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args.kwargs
+        assert call_kwargs.get("optimize_query") is True
+
+        # Verify results
+        assert results.total == 1
+        assert len(results.memories) == 1
+
+
+@pytest.mark.asyncio
+async def test_search_long_term_memory_with_optimize_query_false_explicit(
+    memory_test_client: MemoryAPIClient,
+):
+    """Test that client search_long_term_memory can use optimize_query=False when explicitly set."""
+    with patch(
+        "agent_memory_server.long_term_memory.search_long_term_memories"
+    ) as mock_search:
+        mock_search.return_value = MemoryRecordResultsResponse(
+            total=1,
+            memories=[
+                MemoryRecordResult(
+                    id="test-1",
+                    text="User preferences about UI",
+                    memory_type=MemoryTypeEnum.SEMANTIC,
+                    dist=0.1,
+                )
+            ],
+            next_offset=None,
+        )
+
+        # Call search with explicit optimize_query=False
+        await memory_test_client.search_long_term_memory(
+            text="tell me about my preferences", optimize_query=False
+        )
+
+        # Verify search was called with optimize_query=False
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args.kwargs
+        assert call_kwargs.get("optimize_query") is False
+
+
+@pytest.mark.asyncio
+async def test_search_memory_tool_with_optimize_query_false_default(
+    memory_test_client: MemoryAPIClient,
+):
+    """Test that client search_memory_tool uses optimize_query=False by default (for LLM tool use)."""
+    with patch(
+        "agent_memory_server.long_term_memory.search_long_term_memories"
+    ) as mock_search:
+        mock_search.return_value = MemoryRecordResultsResponse(
+            total=1,
+            memories=[
+                MemoryRecordResult(
+                    id="test-1",
+                    text="User preferences about UI",
+                    memory_type=MemoryTypeEnum.SEMANTIC,
+                    dist=0.1,
+                )
+            ],
+            next_offset=None,
+        )
+
+        # Call search_memory_tool without optimize_query parameter (should default to False for LLM tools)
+        results = await memory_test_client.search_memory_tool(
+            query="tell me about my preferences"
+        )
+
+        # Verify search was called with optimize_query=False (default for LLM tools)
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args.kwargs
+        assert call_kwargs.get("optimize_query") is False
+
+        # Verify results format is suitable for LLM consumption
+        assert "memories" in results
+        assert "summary" in results
+
+
+@pytest.mark.asyncio
+async def test_search_memory_tool_with_optimize_query_true_explicit(
+    memory_test_client: MemoryAPIClient,
+):
+    """Test that client search_memory_tool can use optimize_query=True when explicitly set."""
+    with patch(
+        "agent_memory_server.long_term_memory.search_long_term_memories"
+    ) as mock_search:
+        mock_search.return_value = MemoryRecordResultsResponse(
+            total=1,
+            memories=[
+                MemoryRecordResult(
+                    id="test-1",
+                    text="User preferences about UI",
+                    memory_type=MemoryTypeEnum.SEMANTIC,
+                    dist=0.1,
+                )
+            ],
+            next_offset=None,
+        )
+
+        # Call search_memory_tool with explicit optimize_query=True
+        await memory_test_client.search_memory_tool(
+            query="tell me about my preferences", optimize_query=True
+        )
+
+        # Verify search was called with optimize_query=True
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args.kwargs
+        assert call_kwargs.get("optimize_query") is True
+
+
+@pytest.mark.asyncio
+async def test_memory_prompt_with_optimize_query_default_true(
+    memory_test_client: MemoryAPIClient,
+):
+    """Test that client memory_prompt uses optimize_query=True by default."""
+    with patch(
+        "agent_memory_server.long_term_memory.search_long_term_memories"
+    ) as mock_search:
+        mock_search.return_value = MemoryRecordResultsResponse(
+            total=0, memories=[], next_offset=None
+        )
+
+        # Call memory_prompt without optimize_query parameter (should default to True)
+        result = await memory_test_client.memory_prompt(
+            query="what are my preferences?", long_term_search={"text": "preferences"}
+        )
+
+        # Verify search was called with optimize_query=True (default)
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args.kwargs
+        assert call_kwargs.get("optimize_query") is True
+        assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_memory_prompt_with_optimize_query_false_explicit(
+    memory_test_client: MemoryAPIClient,
+):
+    """Test that client memory_prompt can use optimize_query=False when explicitly set."""
+    with patch(
+        "agent_memory_server.long_term_memory.search_long_term_memories"
+    ) as mock_search:
+        mock_search.return_value = MemoryRecordResultsResponse(
+            total=0, memories=[], next_offset=None
+        )
+
+        # Call memory_prompt with explicit optimize_query=False
+        result = await memory_test_client.memory_prompt(
+            query="what are my preferences?",
+            long_term_search={"text": "preferences"},
+            optimize_query=False,
+        )
+
+        # Verify search was called with optimize_query=False
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args.kwargs
+        assert call_kwargs.get("optimize_query") is False
+        assert result is not None

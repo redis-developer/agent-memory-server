@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     anthropic_api_base: str | None = None
     generation_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"
+
+    # Model selection for query optimization
+    slow_model: str = "gpt-4o"  # Slower, more capable model for complex tasks
+    fast_model: str = (
+        "gpt-4o-mini"  # Faster, smaller model for quick tasks like query optimization
+    )
     port: int = 8000
     mcp_port: int = 9000
 

@@ -494,6 +494,7 @@ async def create_long_term_memory(
 @router.post("/v1/long-term-memory/search", response_model=MemoryRecordResultsResponse)
 async def search_long_term_memory(
     payload: SearchRequest,
+    optimize_query: bool = True,
     current_user: UserInfo = Depends(get_current_user),
 ):
     """
@@ -501,6 +502,7 @@ async def search_long_term_memory(
 
     Args:
         payload: Search payload with filter objects for precise queries
+        optimize_query: Whether to optimize the query for vector search using a fast model (default: True)
 
     Returns:
         List of search results
@@ -517,6 +519,7 @@ async def search_long_term_memory(
         "distance_threshold": payload.distance_threshold,
         "limit": payload.limit,
         "offset": payload.offset,
+        "optimize_query": optimize_query,
         **filters,
     }
 
@@ -549,13 +552,14 @@ async def delete_long_term_memory(
 @router.post("/v1/memory/prompt", response_model=MemoryPromptResponse)
 async def memory_prompt(
     params: MemoryPromptRequest,
+    optimize_query: bool = True,
     current_user: UserInfo = Depends(get_current_user),
 ) -> MemoryPromptResponse:
     """
     Hydrate a user query with memory context and return a prompt
     ready to send to an LLM.
 
-    `query` is the input text that the caller of this API wants to use to find
+    `query` is the query for vector search that the caller of this API wants to use to find
     relevant context. If `session_id` is provided and matches an existing
     session, the resulting prompt will include those messages as the immediate
     history of messages leading to a message containing `query`.
@@ -566,6 +570,7 @@ async def memory_prompt(
 
     Args:
         params: MemoryPromptRequest
+        optimize_query: Whether to optimize the query for vector search using a fast model (default: True)
 
     Returns:
         List of messages to send to an LLM, hydrated with relevant memory context
@@ -671,6 +676,7 @@ async def memory_prompt(
         logger.debug(f"[memory_prompt] Search payload: {search_payload}")
         long_term_memories = await search_long_term_memory(
             search_payload,
+            optimize_query=optimize_query,
         )
 
         logger.debug(f"[memory_prompt] Long-term memories: {long_term_memories}")

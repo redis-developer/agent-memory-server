@@ -180,7 +180,7 @@ class TestMCP:
         # Capture injected namespace
         injected = {}
 
-        async def fake_core_search(payload):
+        async def fake_core_search(payload, optimize_query=False):
             injected["namespace"] = payload.namespace.eq if payload.namespace else None
             # Return a dummy result with total>0 to skip fake fallback
             return MemoryRecordResults(
@@ -231,7 +231,9 @@ class TestMCP:
         # Capture the parameters passed to core_memory_prompt
         captured_params = {}
 
-        async def mock_core_memory_prompt(params: MemoryPromptRequest):
+        async def mock_core_memory_prompt(
+            params: MemoryPromptRequest, optimize_query: bool = False
+        ):
             captured_params["query"] = params.query
             captured_params["session"] = params.session
             captured_params["long_term_search"] = params.long_term_search
@@ -468,3 +470,123 @@ class TestMCP:
             extracted_memory.discrete_memory_extracted == "t"
         ), f"ExtractedMemoryRecord should default to 't', got '{extracted_memory.discrete_memory_extracted}'"
         assert extracted_memory.memory_type.value == "semantic"
+
+    @pytest.mark.asyncio
+    async def test_search_long_term_memory_with_optimize_query_false_default(
+        self, session, mcp_test_setup
+    ):
+        """Test that MCP search_long_term_memory uses optimize_query=False by default."""
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_search_long_term_memory"
+            ) as mock_search:
+                mock_search.return_value = MemoryRecordResults(total=0, memories=[])
+
+                # Call search without optimize_query parameter
+                await client.call_tool(
+                    "search_long_term_memory", {"text": "tell me about my preferences"}
+                )
+
+                # Verify search was called with optimize_query=False (MCP default)
+                mock_search.assert_called_once()
+                call_args = mock_search.call_args
+                # Check the SearchRequest object passed to mock_search
+                call_args[0][0]  # First positional argument
+                # The optimize_query parameter should be passed separately
+                optimize_query = call_args[1]["optimize_query"]
+                assert optimize_query is False
+
+    @pytest.mark.asyncio
+    async def test_search_long_term_memory_with_optimize_query_true_explicit(
+        self, session, mcp_test_setup
+    ):
+        """Test that MCP search_long_term_memory can use optimize_query=True when explicitly set."""
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_search_long_term_memory"
+            ) as mock_search:
+                mock_search.return_value = MemoryRecordResults(total=0, memories=[])
+
+                # Call search with explicit optimize_query=True
+                await client.call_tool(
+                    "search_long_term_memory",
+                    {"text": "tell me about my preferences", "optimize_query": True},
+                )
+
+                # Verify search was called with optimize_query=True
+                mock_search.assert_called_once()
+                call_args = mock_search.call_args
+                optimize_query = call_args[1]["optimize_query"]
+                assert optimize_query is True
+
+    @pytest.mark.asyncio
+    async def test_search_long_term_memory_with_optimize_query_false_explicit(
+        self, session, mcp_test_setup
+    ):
+        """Test that MCP search_long_term_memory can use optimize_query=False when explicitly set."""
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_search_long_term_memory"
+            ) as mock_search:
+                mock_search.return_value = MemoryRecordResults(total=0, memories=[])
+
+                # Call search with explicit optimize_query=False
+                await client.call_tool(
+                    "search_long_term_memory",
+                    {"text": "what are my UI preferences", "optimize_query": False},
+                )
+
+                # Verify search was called with optimize_query=False
+                mock_search.assert_called_once()
+                call_args = mock_search.call_args
+                optimize_query = call_args[1]["optimize_query"]
+                assert optimize_query is False
+
+    @pytest.mark.asyncio
+    async def test_memory_prompt_with_optimize_query_false_default(
+        self, session, mcp_test_setup
+    ):
+        """Test that MCP memory_prompt uses optimize_query=False by default."""
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_memory_prompt"
+            ) as mock_prompt:
+                mock_prompt.return_value = MemoryPromptResponse(
+                    messages=[SystemMessage(content="Test response")]
+                )
+
+                # Call memory prompt without optimize_query parameter
+                await client.call_tool(
+                    "memory_prompt", {"query": "what are my preferences?"}
+                )
+
+                # Verify memory_prompt was called with optimize_query=False (MCP default)
+                mock_prompt.assert_called_once()
+                call_args = mock_prompt.call_args
+                optimize_query = call_args[1]["optimize_query"]
+                assert optimize_query is False
+
+    @pytest.mark.asyncio
+    async def test_memory_prompt_with_optimize_query_true_explicit(
+        self, session, mcp_test_setup
+    ):
+        """Test that MCP memory_prompt can use optimize_query=True when explicitly set."""
+        async with client_session(mcp_app._mcp_server) as client:
+            with mock.patch(
+                "agent_memory_server.mcp.core_memory_prompt"
+            ) as mock_prompt:
+                mock_prompt.return_value = MemoryPromptResponse(
+                    messages=[SystemMessage(content="Test response")]
+                )
+
+                # Call memory prompt with explicit optimize_query=True
+                await client.call_tool(
+                    "memory_prompt",
+                    {"query": "what are my preferences?", "optimize_query": True},
+                )
+
+                # Verify memory_prompt was called with optimize_query=True
+                mock_prompt.assert_called_once()
+                call_args = mock_prompt.call_args
+                optimize_query = call_args[1]["optimize_query"]
+                assert optimize_query is True

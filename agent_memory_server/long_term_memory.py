@@ -28,6 +28,7 @@ from agent_memory_server.llms import (
     AnthropicClientWrapper,
     OpenAIClientWrapper,
     get_model_client,
+    optimize_query_for_vector_search,
 )
 from agent_memory_server.models import (
     ExtractedMemoryRecord,
@@ -718,13 +719,13 @@ async def search_long_term_memories(
     memory_hash: MemoryHash | None = None,
     limit: int = 10,
     offset: int = 0,
+    optimize_query: bool = True,
 ) -> MemoryRecordResults:
     """
     Search for long-term memories using the pluggable VectorStore adapter.
 
     Args:
-        text: Search query text
-        redis: Redis client (kept for compatibility but may be unused depending on backend)
+        text: Query for vector search - will be used for semantic similarity matching
         session_id: Optional session ID filter
         user_id: Optional user ID filter
         namespace: Optional namespace filter
@@ -738,16 +739,22 @@ async def search_long_term_memories(
         memory_hash: Optional memory hash filter
         limit: Maximum number of results
         offset: Offset for pagination
+        optimize_query: Whether to optimize the query for vector search using a fast model (default: True)
 
     Returns:
         MemoryRecordResults containing matching memories
     """
+    # Optimize query for vector search if requested
+    search_query = text
+    if optimize_query and text:
+        search_query = await optimize_query_for_vector_search(text)
+
     # Get the VectorStore adapter
     adapter = await get_vectorstore_adapter()
 
     # Delegate search to the adapter
     return await adapter.search_memories(
-        query=text,
+        query=search_query,
         session_id=session_id,
         user_id=user_id,
         namespace=namespace,

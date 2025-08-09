@@ -574,12 +574,13 @@ class MemoryAPIClient:
         memory_type: MemoryType | dict[str, Any] | None = None,
         limit: int = 10,
         offset: int = 0,
+        optimize_query: bool = True,
     ) -> MemoryRecordResults:
         """
         Search long-term memories using semantic search and filters.
 
         Args:
-            text: Search query text for semantic similarity
+            text: Query for vector search - will be used for semantic similarity matching
             session_id: Optional session ID filter
             namespace: Optional namespace filter
             topics: Optional topics filter
@@ -591,6 +592,7 @@ class MemoryAPIClient:
             memory_type: Optional memory type filter
             limit: Maximum number of results to return (default: 10)
             offset: Offset for pagination (default: 0)
+            optimize_query: Whether to optimize the query for vector search using a fast model (default: True)
 
         Returns:
             MemoryRecordResults with matching memories and metadata
@@ -669,10 +671,14 @@ class MemoryAPIClient:
         if distance_threshold is not None:
             payload["distance_threshold"] = distance_threshold
 
+        # Add optimize_query as query parameter
+        params = {"optimize_query": str(optimize_query).lower()}
+
         try:
             response = await self._client.post(
                 "/v1/long-term-memory/search",
                 json=payload,
+                params=params,
             )
             response.raise_for_status()
             return MemoryRecordResults(**response.json())
@@ -691,6 +697,7 @@ class MemoryAPIClient:
         max_results: int = 5,
         min_relevance: float | None = None,
         user_id: str | None = None,
+        optimize_query: bool = False,
     ) -> dict[str, Any]:
         """
         Simplified long-term memory search designed for LLM tool use.
@@ -701,13 +708,14 @@ class MemoryAPIClient:
         searches long-term memory, not working memory.
 
         Args:
-            query: The search query text
+            query: The query for vector search
             topics: Optional list of topic strings to filter by
             entities: Optional list of entity strings to filter by
             memory_type: Optional memory type ("episodic", "semantic", "message")
             max_results: Maximum results to return (default: 5)
             min_relevance: Optional minimum relevance score (0.0-1.0)
             user_id: Optional user ID to filter memories by
+            optimize_query: Whether to optimize the query for vector search (default: False - LLMs typically provide already optimized queries)
 
         Returns:
             Dict with 'memories' list and 'summary' for LLM consumption
@@ -759,6 +767,7 @@ class MemoryAPIClient:
             distance_threshold=distance_threshold,
             limit=max_results,
             user_id=user_id_filter,
+            optimize_query=optimize_query,
         )
 
         # Format for LLM consumption
@@ -828,13 +837,13 @@ class MemoryAPIClient:
             "type": "function",
             "function": {
                 "name": "search_memory",
-                "description": "Search long-term memory for relevant information based on a query. Use this when you need to recall past conversations, user preferences, or previously stored information. Note: This searches only long-term memory, not current working memory.",
+                "description": "Search long-term memory for relevant information using a query for vector search. Use this when you need to recall past conversations, user preferences, or previously stored information. Note: This searches only long-term memory, not current working memory.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The search query describing what information you're looking for",
+                            "description": "The query for vector search describing what information you're looking for",
                         },
                         "topics": {
                             "type": "array",
@@ -867,6 +876,11 @@ class MemoryAPIClient:
                         "user_id": {
                             "type": "string",
                             "description": "Optional user ID to filter memories by (e.g., 'user123')",
+                        },
+                        "optimize_query": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Whether to optimize the query for vector search (default: False - LLMs typically provide already optimized queries)",
                         },
                     },
                     "required": ["query"],
@@ -2138,6 +2152,7 @@ class MemoryAPIClient:
         context_window_max: int | None = None,
         long_term_search: dict[str, Any] | None = None,
         user_id: str | None = None,
+        optimize_query: bool = True,
     ) -> dict[str, Any]:
         """
         Hydrate a user query with memory context and return a prompt ready to send to an LLM.
@@ -2145,13 +2160,14 @@ class MemoryAPIClient:
         NOTE: `long_term_search` uses the same filter options as `search_long_term_memories`.
 
         Args:
-            query: The input text to find relevant context for
+            query: The query for vector search to find relevant context for
             session_id: Optional session ID to include session messages
             namespace: Optional namespace for the session
             model_name: Optional model name to determine context window size
             context_window_max: Optional direct specification of context window tokens
             long_term_search: Optional search parameters for long-term memory
             user_id: Optional user ID for the session
+            optimize_query: Whether to optimize the query for vector search using a fast model (default: True)
 
         Returns:
             Dict with messages hydrated with relevant memory context
@@ -2208,10 +2224,14 @@ class MemoryAPIClient:
                     }
             payload["long_term_search"] = long_term_search
 
+        # Add optimize_query as query parameter
+        params = {"optimize_query": str(optimize_query).lower()}
+
         try:
             response = await self._client.post(
                 "/v1/memory/prompt",
                 json=payload,
+                params=params,
             )
             response.raise_for_status()
             result = response.json()
@@ -2235,6 +2255,7 @@ class MemoryAPIClient:
         distance_threshold: float | None = None,
         memory_type: dict[str, Any] | None = None,
         limit: int = 10,
+        optimize_query: bool = True,
     ) -> dict[str, Any]:
         """
         Hydrate a user query with long-term memory context using filters.
@@ -2243,7 +2264,7 @@ class MemoryAPIClient:
         long-term memory search with the specified filters.
 
         Args:
-            query: The input text to find relevant context for
+            query: The query for vector search to find relevant context for
             session_id: Optional session ID filter (as dict)
             namespace: Optional namespace filter (as dict)
             topics: Optional topics filter (as dict)
@@ -2254,6 +2275,7 @@ class MemoryAPIClient:
             distance_threshold: Optional distance threshold
             memory_type: Optional memory type filter (as dict)
             limit: Maximum number of long-term memories to include
+            optimize_query: Whether to optimize the query for vector search using a fast model (default: True)
 
         Returns:
             Dict with messages hydrated with relevant long-term memories
@@ -2285,6 +2307,7 @@ class MemoryAPIClient:
         return await self.memory_prompt(
             query=query,
             long_term_search=long_term_search,
+            optimize_query=optimize_query,
         )
 
     def _deep_merge_dicts(

@@ -423,3 +423,77 @@ async def get_model_client(
         raise ValueError(f"Unsupported model provider: {model_config.provider}")
 
     return _model_clients[model_name]
+
+
+async def optimize_query_for_vector_search(
+    query: str,
+    model_name: str | None = None,
+) -> str:
+    """
+    Optimize a user query for vector search using a fast model.
+
+    This function takes a natural language query and rewrites it to be more effective
+    for semantic similarity search. It uses a fast, small model to improve search
+    performance while maintaining query intent.
+
+    Args:
+        query: The original user query to optimize
+        model_name: Model to use for optimization (defaults to settings.fast_model)
+
+    Returns:
+        Optimized query string better suited for vector search
+    """
+    if not query or not query.strip():
+        return query
+
+    # Use fast model from settings if not specified
+    effective_model = model_name or settings.fast_model
+
+    # Create optimization prompt
+    optimization_prompt = f"""Transform this natural language query into an optimized version for semantic search. The goal is to make it more effective for finding semantically similar content while preserving the original intent.
+
+Guidelines:
+- Keep the core meaning and intent
+- Use more specific and descriptive terms
+- Remove unnecessary words like "tell me", "I want to know", "can you"
+- Focus on the key concepts and topics
+- Make it concise but comprehensive
+
+Original query: {query}
+
+Optimized query:"""
+
+    try:
+        client = await get_model_client(effective_model)
+
+        response = await client.create_chat_completion(
+            model=effective_model,
+            prompt=optimization_prompt,
+        )
+
+        if response.choices and len(response.choices) > 0:
+            optimized = ""
+            if hasattr(response.choices[0], "message"):
+                optimized = response.choices[0].message.content
+            elif hasattr(response.choices[0], "text"):
+                optimized = response.choices[0].text
+            else:
+                optimized = str(response.choices[0])
+
+            # Clean up the response
+            optimized = optimized.strip()
+
+            # Fallback to original if optimization failed
+            if not optimized or len(optimized) < 2:
+                logger.warning(f"Query optimization failed for: {query}")
+                return query
+
+            logger.debug(f"Optimized query: '{query}' -> '{optimized}'")
+            return optimized
+
+    except Exception as e:
+        logger.warning(f"Failed to optimize query '{query}': {e}")
+        # Return original query if optimization fails
+        return query
+
+    return query
