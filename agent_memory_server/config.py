@@ -129,6 +129,14 @@ class Settings(BaseSettings):
     default_mcp_user_id: str | None = None
     default_mcp_namespace: str | None = None
 
+    # Forgetting settings
+    forgetting_enabled: bool = False
+    forgetting_every_minutes: int = 60
+    forgetting_max_age_days: float | None = None
+    forgetting_max_inactive_days: float | None = None
+    # Keep only top N most recent (by recency score) when budget is set
+    forgetting_budget_keep_top_n: int | None = None
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

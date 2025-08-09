@@ -12,7 +12,9 @@ from agent_memory_server.long_term_memory import (
     compact_long_term_memories,
     delete_long_term_memories,
     extract_memory_structure,
+    forget_long_term_memories,
     index_long_term_memories,
+    periodic_forget_long_term_memories,
     promote_working_memory_to_long_term,
 )
 from agent_memory_server.summarization import summarize_session
@@ -30,6 +32,8 @@ task_collection = [
     extract_discrete_memories,
     promote_working_memory_to_long_term,
     delete_long_term_memories,
+    forget_long_term_memories,
+    periodic_forget_long_term_memories,
 ]
 
 

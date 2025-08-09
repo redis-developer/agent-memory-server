@@ -2,7 +2,9 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from math import exp, log
 from typing import Any
 
 from docket.dependencies import Perpetual
@@ -33,6 +35,7 @@ from agent_memory_server.models import (
     ExtractedMemoryRecord,
     MemoryMessage,
     MemoryRecord,
+    MemoryRecordResult,
     MemoryRecordResults,
     MemoryTypeEnum,
 )
@@ -716,6 +719,8 @@ async def search_long_term_memories(
     memory_type: MemoryType | None = None,
     event_date: EventDate | None = None,
     memory_hash: MemoryHash | None = None,
+    server_side_recency: bool | None = None,
+    recency_params: dict | None = None,
     limit: int = 10,
     offset: int = 0,
 ) -> MemoryRecordResults:
@@ -759,6 +764,8 @@ async def search_long_term_memories(
         event_date=event_date,
         memory_hash=memory_hash,
         distance_threshold=distance_threshold,
+        server_side_recency=server_side_recency,
+        recency_params=recency_params,
         limit=limit,
         offset=offset,
     )
@@ -1353,3 +1360,300 @@ async def delete_long_term_memories(
     """
     adapter = await get_vectorstore_adapter()
     return await adapter.delete_memories(ids)
+
+
+# =========================
+# Recency scoring and forgetting helpers (pure functions for TDD)
+# =========================
+
+
+def _days_between(now: datetime, then: datetime | None) -> float:
+    if then is None:
+        return float("inf")
+    delta = now - then
+    return max(delta.total_seconds() / 86400.0, 0.0)
+
+
+def score_recency(
+    memory: MemoryRecordResult,
+    *,
+    now: datetime,
+    params: dict,
+) -> float:
+    """Compute a recency score in [0, 1] combining freshness and novelty.
+
+    - freshness f decays with last_accessed using half-life `half_life_last_access_days`
+    - novelty a decays with created_at using half-life `half_life_created_days`
+    - r = wf * f + wa * a
+    """
+    half_life_la = max(float(params.get("half_life_last_access_days", 7.0)), 0.001)
+    half_life_cr = max(float(params.get("half_life_created_days", 30.0)), 0.001)
+    wf = float(params.get("wf", 0.6))
+    wa = float(params.get("wa", 0.4))
+
+    # Convert to decay rates
+    mu = log(2.0) / half_life_la
+    lam = log(2.0) / half_life_cr
+
+    days_since_access = _days_between(now, memory.last_accessed)
+    days_since_created = _days_between(now, memory.created_at)
+
+    f = exp(-mu * days_since_access)
+    a = exp(-lam * days_since_created)
+
+    r = wf * f + wa * a
+    # Clamp to [0, 1]
+    return max(0.0, min(1.0, r))
+
+
+def rerank_with_recency(
+    results: list[MemoryRecordResult],
+    *,
+    now: datetime,
+    params: dict,
+) -> list[MemoryRecordResult]:
+    """Re-rank results using combined semantic similarity and recency.
+
+    score = w_sem * (1 - dist) + w_recency * recency_score
+    """
+    w_sem = float(params.get("w_sem", 0.8))
+    w_rec = float(params.get("w_recency", 0.2))
+
+    def combined_score(mem: MemoryRecordResult) -> float:
+        sim = 1.0 - float(mem.dist)
+        rec = score_recency(mem, now=now, params=params)
+        return w_sem * sim + w_rec * rec
+
+    # Sort by descending score (stable sort preserves original order on ties)
+    return sorted(results, key=combined_score, reverse=True)
+
+
+def select_ids_for_forgetting(
+    results: Iterable[MemoryRecordResult],
+    *,
+    policy: dict,
+    now: datetime,
+    pinned_ids: set[str] | None = None,
+) -> list[str]:
+    """Select IDs for deletion based on TTL, inactivity and budget policies.
+
+    Policy keys:
+      - max_age_days: float | None
+      - max_inactive_days: float | None
+      - budget: int | None (keep top N by recency score)
+      - memory_type_allowlist: set[str] | list[str] | None (only consider these types for deletion)
+    """
+    pinned_ids = pinned_ids or set()
+    max_age_days = policy.get("max_age_days")
+    max_inactive_days = policy.get("max_inactive_days")
+    hard_age_multiplier = float(policy.get("hard_age_multiplier", 12.0))
+    budget = policy.get("budget")
+    allowlist = policy.get("memory_type_allowlist")
+    if allowlist is not None and not isinstance(allowlist, set):
+        allowlist = set(allowlist)
+
+    to_delete: set[str] = set()
+    eligible_for_budget: list[MemoryRecordResult] = []
+
+    for mem in results:
+        if not mem.id or mem.id in pinned_ids or getattr(mem, "pinned", False):
+            continue
+
+        # If allowlist provided, only consider those types for deletion
+        mem_type_value = (
+            mem.memory_type.value
+            if isinstance(mem.memory_type, MemoryTypeEnum)
+            else mem.memory_type
+        )
+        if allowlist is not None and mem_type_value not in allowlist:
+            # Not eligible for deletion under current policy
+            continue
+
+        age_days = _days_between(now, mem.created_at)
+        inactive_days = _days_between(now, mem.last_accessed)
+
+        # Combined TTL/inactivity policy:
+        # - If both thresholds are set, prefer not to delete recently accessed
+        #   items unless they are extremely old.
+        # - Extremely old: age > max_age_days * hard_age_multiplier (default 12x)
+        if isinstance(max_age_days, int | float) and isinstance(
+            max_inactive_days, int | float
+        ):
+            if age_days > float(max_age_days) * hard_age_multiplier:
+                to_delete.add(mem.id)
+                continue
+            if age_days > float(max_age_days) and inactive_days > float(
+                max_inactive_days
+            ):
+                to_delete.add(mem.id)
+                continue
+        else:
+            ttl_hit = isinstance(max_age_days, int | float) and age_days > float(
+                max_age_days
+            )
+            inactivity_hit = isinstance(max_inactive_days, int | float) and (
+                inactive_days > float(max_inactive_days)
+            )
+            if ttl_hit or inactivity_hit:
+                to_delete.add(mem.id)
+                continue
+
+        # Eligible for budget consideration
+        eligible_for_budget.append(mem)
+
+    # Budget-based pruning (keep top N by recency among eligible)
+    if isinstance(budget, int) and budget >= 0 and budget < len(eligible_for_budget):
+        params = {
+            "w_sem": 0.0,  # budget considers only recency
+            "w_recency": 1.0,
+            "wf": 0.6,
+            "wa": 0.4,
+            "half_life_last_access_days": 7.0,
+            "half_life_created_days": 30.0,
+        }
+        ranked = rerank_with_recency(eligible_for_budget, now=now, params=params)
+        keep_ids = {mem.id for mem in ranked[:budget]}
+        for mem in eligible_for_budget:
+            if mem.id not in keep_ids:
+                to_delete.add(mem.id)
+
+    return list(to_delete)
+
+
+async def update_last_accessed(
+    ids: list[str],
+    *,
+    redis_client: Redis | None = None,
+    min_interval_seconds: int = 900,
+) -> int:
+    """Rate-limited update of last_accessed for a list of memory IDs.
+
+    Returns the number of records updated.
+    """
+    if not ids:
+        return 0
+
+    redis = redis_client or await get_redis_conn()
+    now_ts = int(datetime.now(UTC).timestamp())
+
+    # Batch read existing last_accessed
+    keys = [Keys.memory_key(mid) for mid in ids]
+    pipeline = redis.pipeline()
+    for key in keys:
+        pipeline.hget(key, "last_accessed")
+    current_vals = await pipeline.execute()
+
+    # Decide which to update and whether to increment access_count
+    to_update: list[tuple[str, int]] = []
+    incr_keys: list[str] = []
+    for key, val in zip(keys, current_vals, strict=False):
+        try:
+            last_ts = int(val) if val is not None else 0
+        except (TypeError, ValueError):
+            last_ts = 0
+        if now_ts - last_ts >= min_interval_seconds:
+            to_update.append((key, now_ts))
+            incr_keys.append(key)
+
+    if not to_update:
+        return 0
+
+    pipeline2 = redis.pipeline()
+    for key, ts in to_update:
+        pipeline2.hset(key, mapping={"last_accessed": str(ts)})
+        pipeline2.hincrby(key, "access_count", 1)
+    await pipeline2.execute()
+    return len(to_update)
+
+
+async def forget_long_term_memories(
+    policy: dict,
+    *,
+    namespace: str | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    limit: int = 1000,
+    dry_run: bool = True,
+    pinned_ids: list[str] | None = None,
+) -> dict:
+    """Select and delete long-term memories according to policy.
+
+    Uses RedisVL via the vectorstore adapter to fetch candidates (empty query + filters),
+    then applies `select_ids_for_forgetting` locally and deletes via adapter.
+    """
+    adapter = await get_vectorstore_adapter()
+
+    # Build filters
+    namespace_filter = Namespace(eq=namespace) if namespace else None
+    user_id_filter = UserId(eq=user_id) if user_id else None
+    session_id_filter = SessionId(eq=session_id) if session_id else None
+
+    # Fetch candidates with an empty query honoring filters
+    results = await adapter.search_memories(
+        query="",
+        namespace=namespace_filter,
+        user_id=user_id_filter,
+        session_id=session_id_filter,
+        limit=limit,
+    )
+
+    now = datetime.now(UTC)
+    candidate_results = results.memories or []
+
+    # Select IDs for deletion using policy
+    to_delete_ids = select_ids_for_forgetting(
+        candidate_results,
+        policy=policy,
+        now=now,
+        pinned_ids=set(pinned_ids) if pinned_ids else None,
+    )
+
+    deleted = 0
+    if to_delete_ids and not dry_run:
+        deleted = await adapter.delete_memories(to_delete_ids)
+
+    return {
+        "scanned": len(candidate_results),
+        "deleted": deleted if not dry_run else len(to_delete_ids),
+        "deleted_ids": to_delete_ids,
+        "dry_run": dry_run,
+    }
+
+
+async def periodic_forget_long_term_memories(
+    *,
+    namespace: str | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    limit: int = 1000,
+    dry_run: bool = False,
+    perpetual: Perpetual = Perpetual(
+        every=timedelta(minutes=settings.forgetting_every_minutes), automatic=True
+    ),
+) -> dict:
+    """Periodic forgetting using defaults from settings.
+
+    This function can be registered with Docket and will run automatically
+    according to the `perpetual` schedule when a worker is active.
+    """
+    # Build default policy from settings
+    policy: dict[str, object] = {
+        "max_age_days": settings.forgetting_max_age_days,
+        "max_inactive_days": settings.forgetting_max_inactive_days,
+        "budget": settings.forgetting_budget_keep_top_n,
+        "memory_type_allowlist": None,
+    }
+
+    # If feature disabled, no-op
+    if not settings.forgetting_enabled:
+        logger.info("Forgetting is disabled; skipping periodic run")
+        return {"scanned": 0, "deleted": 0, "deleted_ids": [], "dry_run": True}
+
+    return await forget_long_term_memories(
+        policy,
+        namespace=namespace,
+        user_id=user_id,
+        session_id=session_id,
+        limit=limit,
+        dry_run=dry_run,
+    )

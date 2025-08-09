@@ -36,6 +36,7 @@ from .models import (
     MemoryRecordResults,
     MemoryTypeEnum,
     ModelNameLiteral,
+    RecencyConfig,
     SessionListResponse,
     WorkingMemory,
     WorkingMemoryResponse,
@@ -572,6 +573,7 @@ class MemoryAPIClient:
         user_id: UserId | dict[str, Any] | None = None,
         distance_threshold: float | None = None,
         memory_type: MemoryType | dict[str, Any] | None = None,
+        recency: RecencyConfig | None = None,
         limit: int = 10,
         offset: int = 0,
     ) -> MemoryRecordResults:
@@ -669,13 +671,45 @@ class MemoryAPIClient:
         if distance_threshold is not None:
             payload["distance_threshold"] = distance_threshold
 
+        # Add recency config if provided
+        if recency is not None:
+            if recency.recency_boost is not None:
+                payload["recency_boost"] = recency.recency_boost
+            if recency.w_sem is not None:
+                payload["recency_w_sem"] = recency.w_sem
+            if recency.w_recency is not None:
+                payload["recency_w_recency"] = recency.w_recency
+            if recency.wf is not None:
+                payload["recency_wf"] = recency.wf
+            if recency.wa is not None:
+                payload["recency_wa"] = recency.wa
+            if recency.half_life_last_access_days is not None:
+                payload["recency_half_life_last_access_days"] = (
+                    recency.half_life_last_access_days
+                )
+            if recency.half_life_created_days is not None:
+                payload["recency_half_life_created_days"] = (
+                    recency.half_life_created_days
+                )
+            if recency.server_side_recency is not None:
+                payload["server_side_recency"] = recency.server_side_recency
+
         try:
             response = await self._client.post(
                 "/v1/long-term-memory/search",
                 json=payload,
             )
             response.raise_for_status()
-            return MemoryRecordResults(**response.json())
+            data = response.json()
+            # Some tests may stub json() as an async function; handle awaitable
+            try:
+                import inspect
+
+                if inspect.isawaitable(data):
+                    data = await data
+            except Exception:
+                pass
+            return MemoryRecordResults(**data)
         except httpx.HTTPStatusError as e:
             self._handle_http_error(e.response)
             raise

@@ -231,5 +231,5 @@ libs/redis/docs/.Trash*
 .cursor
 
 *.pyc
-ai
+.ai
 .claude

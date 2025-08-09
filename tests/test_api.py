@@ -74,6 +74,117 @@ class TestMemoryEndpoints:
         assert response.sessions == [session]
         assert response.total == 1
 
+    @pytest.mark.asyncio
+    async def test_forget_endpoint_dry_run(self, client):
+        payload = {
+            "policy": {
+                "max_age_days": 30,
+                "max_inactive_days": 30,
+                "budget": None,
+                "memory_type_allowlist": None,
+            },
+            "namespace": "ns1",
+            "user_id": "u1",
+            "dry_run": True,
+            "limit": 100,
+            "pinned_ids": ["a"],
+        }
+
+        # Mock the underlying function to avoid needing a live backend
+        with patch(
+            "agent_memory_server.api.long_term_memory.forget_long_term_memories"
+        ) as mock_forget:
+            mock_forget.return_value = {
+                "scanned": 3,
+                "deleted": 2,
+                "deleted_ids": ["a", "b"],
+                "dry_run": True,
+            }
+
+            resp = await client.post("/v1/long-term-memory/forget", json=payload)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["dry_run"] is True
+            assert data["deleted"] == 2
+            # Verify API forwarded pinned_ids
+            args, kwargs = mock_forget.call_args
+            assert kwargs["pinned_ids"] == ["a"]
+
+    @pytest.mark.asyncio
+    async def test_search_long_term_memory_respects_recency_boost(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from agent_memory_server.models import (
+            MemoryRecordResult,
+            MemoryRecordResults,
+        )
+
+        now = datetime.now(UTC)
+
+        old_more_sim = MemoryRecordResult(
+            id="old",
+            text="old doc",
+            dist=0.05,
+            created_at=now - timedelta(days=90),
+            updated_at=now - timedelta(days=90),
+            last_accessed=now - timedelta(days=90),
+            user_id="u1",
+            session_id=None,
+            namespace="ns1",
+            topics=[],
+            entities=[],
+            memory_hash="",
+            memory_type="semantic",
+            persisted_at=None,
+            extracted_from=[],
+            event_date=None,
+        )
+        fresh_less_sim = MemoryRecordResult(
+            id="fresh",
+            text="fresh doc",
+            dist=0.25,
+            created_at=now,
+            updated_at=now,
+            last_accessed=now,
+            user_id="u1",
+            session_id=None,
+            namespace="ns1",
+            topics=[],
+            entities=[],
+            memory_hash="",
+            memory_type="semantic",
+            persisted_at=None,
+            extracted_from=[],
+            event_date=None,
+        )
+
+        with (
+            patch(
+                "agent_memory_server.api.long_term_memory.search_long_term_memories"
+            ) as mock_search,
+            patch(
+                "agent_memory_server.api.long_term_memory.update_last_accessed"
+            ) as mock_update,
+        ):
+            mock_search.return_value = MemoryRecordResults(
+                memories=[old_more_sim, fresh_less_sim], total=2, next_offset=None
+            )
+            mock_update.return_value = 0
+
+            payload = {
+                "text": "q",
+                "namespace": {"eq": "ns1"},
+                "user_id": {"eq": "u1"},
+                "limit": 2,
+                "recency_boost": True,
+            }
+            resp = await client.post("/v1/long-term-memory/search", json=payload)
+            assert resp.status_code == 200
+            data = resp.json()
+            # Expect 'fresh' to be ranked first due to recency boost
+            assert len(data["memories"]) == 2
+            assert data["memories"][0]["id"] == "fresh"
+
     async def test_get_memory(self, client, session):
         """Test the get_memory endpoint"""
         session_id = session

@@ -181,6 +181,8 @@ def create_redis_vectorstore(embeddings: Embeddings) -> VectorStore:
             {"name": "entities", "type": "tag"},
             {"name": "memory_hash", "type": "tag"},
             {"name": "discrete_memory_extracted", "type": "tag"},
+            {"name": "pinned", "type": "tag"},
+            {"name": "access_count", "type": "numeric"},
             {"name": "created_at", "type": "numeric"},
             {"name": "last_accessed", "type": "numeric"},
             {"name": "updated_at", "type": "numeric"},

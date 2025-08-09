@@ -20,6 +20,7 @@ from agent_memory_client.models import (
     MemoryRecordResult,
     MemoryRecordResults,
     MemoryTypeEnum,
+    RecencyConfig,
     WorkingMemoryResponse,
 )
 
@@ -296,6 +297,47 @@ class TestPaginationUtilities:
 
             # Should have made 3 API calls
             assert mock_search.call_count == 3
+
+
+class TestRecencyConfig:
+    @pytest.mark.asyncio
+    async def test_recency_config_payload(self, enhanced_test_client):
+        """Ensure RecencyConfig fields are forwarded in the search payload."""
+        with patch.object(enhanced_test_client._client, "post") as mock_post:
+            mock_response = AsyncMock()
+            mock_response.raise_for_status.return_value = None
+            mock_response.json.return_value = MemoryRecordResults(
+                total=0, memories=[], next_offset=None
+            ).model_dump()
+            mock_post.return_value = mock_response
+
+            rc = RecencyConfig(
+                recency_boost=True,
+                w_sem=0.7,
+                w_recency=0.3,
+                wf=0.6,
+                wa=0.4,
+                half_life_last_access_days=7,
+                half_life_created_days=30,
+                server_side_recency=True,
+            )
+
+            await enhanced_test_client.search_long_term_memory(
+                text="q", recency=rc, limit=5
+            )
+
+            # Verify payload contained recency fields
+            args, kwargs = mock_post.call_args
+            assert args[0] == "/v1/long-term-memory/search"
+            body = kwargs["json"]
+            assert body["recency_boost"] is True
+            assert body["recency_w_sem"] == 0.7
+            assert body["recency_w_recency"] == 0.3
+            assert body["recency_wf"] == 0.6
+            assert body["recency_wa"] == 0.4
+            assert body["recency_half_life_last_access_days"] == 7
+            assert body["recency_half_life_created_days"] == 30
+            assert body["server_side_recency"] is True
 
 
 class TestClientSideValidation:

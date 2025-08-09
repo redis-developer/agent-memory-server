@@ -87,9 +87,53 @@ The following endpoints are available:
     "entities": { "all": ["OpenAI", "Claude"] },
     "created_at": { "gte": 1672527600, "lte": 1704063599 },
     "last_accessed": { "gt": 1704063600 },
-    "user_id": { "eq": "user-456" }
+    "user_id": { "eq": "user-456" },
+    "recency_boost": true,
+    "recency_w_sem": 0.8,
+    "recency_w_recency": 0.2,
+    "recency_wf": 0.6,
+    "recency_wa": 0.4,
+    "recency_half_life_last_access_days": 7.0,
+    "recency_half_life_created_days": 30.0
   }
   ```
+
+  When `recency_boost` is enabled (default), results are re-ranked using a combined score of semantic similarity and a recency score computed from `last_accessed` and `created_at`. The optional fields adjust weighting and half-lives. The server rate-limits updates to `last_accessed` in the background when results are returned.
+
+- **POST /v1/long-term-memory/forget**
+  Trigger a forgetting pass (admin/maintenance).
+
+  _Request Body Example:_
+
+  ```json
+  {
+    "policy": {
+      "max_age_days": 30,
+      "max_inactive_days": 30,
+      "budget": null,
+      "memory_type_allowlist": null
+    },
+    "namespace": "ns1",
+    "user_id": "u1",
+    "session_id": null,
+    "limit": 1000,
+    "dry_run": true
+  }
+  ```
+
+  _Response Example:_
+  ```json
+  {
+    "scanned": 123,
+    "deleted": 5,
+    "deleted_ids": ["id1", "id2"],
+    "dry_run": true
+  }
+  ```
+
+  Notes:
+  - Uses the vector store adapter (RedisVL) to select candidates via filters, applies the policy locally, then deletes via the adapter (unless `dry_run=true`).
+  - A periodic variant can be scheduled via Docket when enabled in settings.
 
 - **POST /v1/memory/prompt**
   Generates prompts enriched with relevant memory context from both working

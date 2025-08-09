@@ -5,42 +5,68 @@ This project uses Redis 8, which is the redis:8 docker image.
 Do not use Redis Stack or other earlier versions of Redis.
 
 ## Frequently Used Commands
+
+### Project Setup
 Get started in a new environment by installing `uv`:
 ```bash
-pip install uv
-```
-
-```bash
-# Development workflow
+pip install uv               # Install uv (once)
 uv venv                      # Create a virtualenv (once)
-source .venv/bin/activate    # Activate the virtualenv (start of terminal session)
 uv install --all-extras      # Install dependencies
 uv sync --all-extras         # Sync latest dependencies
+```
+
+### Activate the virtual environment
+You MUST always activate the virtualenv before running commands:
+
+```bash
+source .venv/bin/activate
+```
+
+### Running Tests
+Always run tests before committing. You MUST have 100% of the tests in the
+code basepassing to commit.
+
+Run all tests like this, including tests that require API keys in the
+environment:
+```bash
+uv run pytest --run-api-tests
+```
+
+### Linting
+
+```bash
 uv run ruff check            # Run linting
 uv run ruff format           # Format code
-uv run pytest --run-api-tests # Run all tests
+
+### Managing Dependencies
 uv add <dependency>          # Add a dependency to pyproject.toml and update lock file
 uv remove <dependency>       # Remove a dependency from pyproject.toml and update lock file
 
+### Running Servers
 # Server commands
 uv run agent-memory api      # Start REST API server (default port 8000)
 uv run agent-memory mcp      # Start MCP server (stdio mode)
 uv run agent-memory mcp --mode sse --port 9000  # Start MCP server (SSE mode)
 
+### Database Operations
 # Database/Redis operations
 uv run agent-memory rebuild-index     # Rebuild Redis search index
 uv run agent-memory migrate-memories  # Run memory migrations
 
+### Background Tasks
 # Background task management
 uv run agent-memory task-worker       # Start background task worker
+# Schedule a specific task
 uv run agent-memory schedule-task "agent_memory_server.long_term_memory.compact_long_term_memories"
 
+### Running All Containers
 # Docker development
 docker-compose up            # Start full stack (API, MCP, Redis)
 docker-compose up redis      # Start only Redis Stack
 docker-compose down          # Stop all services
 ```
 
+### Committing Changes
 IMPORTANT: This project uses `pre-commit`. You should run `pre-commit`
 before committing:
 ```bash

@@ -116,6 +116,15 @@ class MemoryRecord(BaseModel):
         description="Datetime when the memory was last updated",
         default_factory=lambda: datetime.now(UTC),
     )
+    pinned: bool = Field(
+        default=False,
+        description="Whether this memory is pinned and should not be auto-deleted",
+    )
+    access_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of times this memory has been accessed (best-effort, rate-limited)",
+    )
     topics: list[str] | None = Field(
         default=None,
         description="Optional topics for the memory record",
@@ -356,6 +365,35 @@ class SearchRequest(BaseModel):
         default=0,
         ge=0,
         description="Optional offset",
+    )
+
+    # Recency re-ranking controls (optional)
+    recency_boost: bool | None = Field(
+        default=None,
+        description="Enable recency-aware re-ranking (defaults to enabled if None)",
+    )
+    recency_w_sem: float | None = Field(
+        default=None, description="Weight for semantic similarity"
+    )
+    recency_w_recency: float | None = Field(
+        default=None, description="Weight for recency score"
+    )
+    recency_wf: float | None = Field(
+        default=None, description="Weight for freshness component"
+    )
+    recency_wa: float | None = Field(
+        default=None, description="Weight for novelty (age) component"
+    )
+    recency_half_life_last_access_days: float | None = Field(
+        default=None, description="Half-life (days) for last_accessed decay"
+    )
+    recency_half_life_created_days: float | None = Field(
+        default=None, description="Half-life (days) for created_at decay"
+    )
+    # Server-side recency rerank (Redis-only path) toggle
+    server_side_recency: bool | None = Field(
+        default=None,
+        description="If true, attempt server-side recency-aware re-ranking when supported by backend",
     )
 
     def get_filters(self):
