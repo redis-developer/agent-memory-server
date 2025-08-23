@@ -220,15 +220,27 @@ class TestScheduleTask:
 class TestTaskWorker:
     """Tests for the task_worker command."""
 
+    @patch("agent_memory_server.cli.ensure_search_index_exists")
+    @patch("agent_memory_server.cli.get_redis_conn")
     @patch("docket.Worker.run")
     @patch("agent_memory_server.cli.settings")
-    def test_task_worker_success(self, mock_settings, mock_worker_run, redis_url):
+    def test_task_worker_success(
+        self,
+        mock_settings,
+        mock_worker_run,
+        mock_get_redis_conn,
+        mock_ensure_index,
+        redis_url,
+    ):
         """Test successful task worker start."""
         mock_settings.use_docket = True
         mock_settings.docket_name = "test-docket"
         mock_settings.redis_url = redis_url
 
         mock_worker_run.return_value = None
+        mock_redis = AsyncMock()
+        mock_get_redis_conn.return_value = mock_redis
+        mock_ensure_index.return_value = None
 
         runner = CliRunner()
         result = runner.invoke(
@@ -249,10 +261,17 @@ class TestTaskWorker:
         assert result.exit_code == 1
         assert "Docket is disabled in settings" in result.output
 
+    @patch("agent_memory_server.cli.ensure_search_index_exists")
+    @patch("agent_memory_server.cli.get_redis_conn")
     @patch("docket.Worker.run")
     @patch("agent_memory_server.cli.settings")
     def test_task_worker_default_params(
-        self, mock_settings, mock_worker_run, redis_url
+        self,
+        mock_settings,
+        mock_worker_run,
+        mock_get_redis_conn,
+        mock_ensure_index,
+        redis_url,
     ):
         """Test task worker with default parameters."""
         mock_settings.use_docket = True
@@ -260,6 +279,9 @@ class TestTaskWorker:
         mock_settings.redis_url = redis_url
 
         mock_worker_run.return_value = None
+        mock_redis = AsyncMock()
+        mock_get_redis_conn.return_value = mock_redis
+        mock_ensure_index.return_value = None
 
         runner = CliRunner()
         result = runner.invoke(task_worker)

@@ -50,8 +50,9 @@ class MemoryRedisVectorStore(RedisVectorStore):
         """Select the relevance score function based on the distance."""
 
         def relevance_score_fn(distance: float) -> float:
-            # Ensure score is between 0 and 1
-            score = (2 - distance) / 2
+            # Use consistent conversion: score = 1 - distance
+            # This matches the conversion used in search_memories: score_threshold = 1.0 - distance_threshold
+            score = 1.0 - distance
             return max(min(score, 1.0), 0.0)
 
         return relevance_score_fn
@@ -307,6 +308,7 @@ class VectorStoreAdapter(ABC):
         access_count_int = int(getattr(memory, "access_count", 0) or 0)
 
         metadata = {
+            "id": memory.id,
             "id_": memory.id,
             "session_id": memory.session_id,
             "user_id": memory.user_id,
@@ -321,7 +323,6 @@ class VectorStoreAdapter(ABC):
             "memory_hash": memory.memory_hash,
             "discrete_memory_extracted": memory.discrete_memory_extracted,
             "memory_type": memory.memory_type.value,
-            "id": memory.id,
             "persisted_at": persisted_at_val,
             "extracted_from": memory.extracted_from,
             "event_date": event_date_val,
@@ -768,8 +769,8 @@ class RedisVectorStoreAdapter(VectorStoreAdapter):
         )
         event_date_val = memory.event_date.timestamp() if memory.event_date else None
 
-        pinned_int = 1 if memory.pinned else 0
-        access_count_int = int(memory.access_count or 0)
+        pinned_int = 1 if getattr(memory, "pinned", False) else 0
+        access_count_int = int(getattr(memory, "access_count", 0) or 0)
 
         metadata = {
             "id_": memory.id,  # The client-generated ID

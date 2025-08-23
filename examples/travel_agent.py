@@ -33,12 +33,17 @@ from agent_memory_client import (
     MemoryAPIClient,
     create_memory_client,
 )
+from agent_memory_client.filters import Namespace, UserId
 from agent_memory_client.models import (
     WorkingMemory,
 )
+from dotenv import load_dotenv
 from langchain_core.callbacks.manager import CallbackManagerForToolRun
 from langchain_openai import ChatOpenAI
 from redis import Redis
+
+
+load_dotenv()
 
 
 try:
@@ -207,7 +212,7 @@ class TravelAgent:
 
         # Set up LLM with function calling
         if available_functions:
-            self.llm = ChatOpenAI(model="gpt-4o", temperature=0.7).bind_functions(
+            self.llm = ChatOpenAI(model="gpt-4o", temperature=0.7).bind_tools(
                 available_functions
             )
         else:
@@ -303,6 +308,7 @@ class TravelAgent:
         context_messages: list,
         session_id: str,
         user_id: str,
+        show_memories: bool = False,
     ) -> str:
         """Handle function calls for both web search and memory tools."""
         function_name = function_call["name"]
@@ -313,7 +319,7 @@ class TravelAgent:
 
         # Handle all memory functions using the client's unified resolver
         return await self._handle_memory_tool_call(
-            function_call, context_messages, session_id, user_id
+            function_call, context_messages, session_id, user_id, show_memories
         )
 
     async def _handle_web_search_call(
@@ -358,6 +364,7 @@ class TravelAgent:
         context_messages: list,
         session_id: str,
         user_id: str,
+        show_memories: bool = False,
     ) -> str:
         """Handle memory tool function calls using the client's unified resolver."""
         function_name = function_call["name"]
@@ -373,6 +380,32 @@ class TravelAgent:
         if not result["success"]:
             logger.error(f"Function call failed: {result['error']}")
             return result["formatted_response"]
+
+        # Show memories when search_memory tool is used and in demo mode
+        if (
+            show_memories
+            and function_name == "search_memory"
+            and "memories" in result.get("raw_result", {})
+        ):
+            memories = result["raw_result"]["memories"]
+            if memories:
+                print(f"🧠 Retrieved {len(memories)} memories:")
+                for i, memory in enumerate(memories[:3], 1):  # Show first 3
+                    memory_text = memory.get("text", "")[:80]
+                    topics = memory.get("topics", [])
+                    relevance = memory.get("dist", 0)
+                    relevance_score = (
+                        max(0, 1 - relevance) if relevance is not None else 0
+                    )
+                    print(
+                        f"   [{i}] {memory_text}... (topics: {topics}, relevance: {relevance_score:.2f})"
+                    )
+                if len(memories) > 3:
+                    print(f"   ... and {len(memories) - 3} more memories")
+                print()
+            else:
+                print("🧠 No relevant memories found for this query")
+                print()
 
         # Generate a follow-up response with the function result
         follow_up_messages = context_messages + [
@@ -392,20 +425,49 @@ class TravelAgent:
         ]
 
         final_response = self.llm.invoke(follow_up_messages)
-        return str(final_response.content)
+        response_content = str(final_response.content)
+
+        # Debug logging for empty responses
+        if not response_content or not response_content.strip():
+            logger.error(
+                f"Empty response from LLM in memory tool call handler. Function: {function_name}"
+            )
+            logger.error(f"Response object: {final_response}")
+            logger.error(f"Response content: '{final_response.content}'")
+            logger.error(
+                f"Response additional_kwargs: {getattr(final_response, 'additional_kwargs', {})}"
+            )
+            return "I apologize, but I couldn't generate a proper response to your request."
+
+        return response_content
 
     async def _generate_response(
-        self, session_id: str, user_id: str, user_input: str
+        self,
+        session_id: str,
+        user_id: str,
+        user_input: str,
+        show_memories: bool = False,
     ) -> str:
         """Generate a response using the LLM with conversation context."""
         # Manage conversation history
         working_memory = await self._get_working_memory(session_id, user_id)
         context_messages = working_memory.messages
 
+        # Convert MemoryMessage objects to dict format for LLM
+        context_messages_dicts = []
+        for msg in context_messages:
+            if hasattr(msg, "role") and hasattr(msg, "content"):
+                # MemoryMessage object - convert to dict
+                msg_dict = {"role": msg.role, "content": msg.content}
+                context_messages_dicts.append(msg_dict)
+            else:
+                # Already a dict
+                context_messages_dicts.append(msg)
+
         # Always ensure system prompt is at the beginning
         # Remove any existing system messages and add our current one
         context_messages = [
-            msg for msg in context_messages if msg.get("role") != "system"
+            msg for msg in context_messages_dicts if msg.get("role") != "system"
         ]
         context_messages.insert(0, SYSTEM_PROMPT)
 
@@ -417,24 +479,222 @@ class TravelAgent:
             response = self.llm.invoke(context_messages)
 
             # Handle function calls using unified approach
-            if (
-                hasattr(response, "additional_kwargs")
-                and "function_call" in response.additional_kwargs
-            ):
-                return await self._handle_function_call(
-                    response.additional_kwargs["function_call"],
-                    context_messages,
-                    session_id,
-                    user_id,
-                )
+            if hasattr(response, "additional_kwargs"):
+                # Check for OpenAI-style function_call (single call)
+                if "function_call" in response.additional_kwargs:
+                    return await self._handle_function_call(
+                        response.additional_kwargs["function_call"],
+                        context_messages,
+                        session_id,
+                        user_id,
+                        show_memories,
+                    )
+                # Check for LangChain-style tool_calls (array of calls)
+                if "tool_calls" in response.additional_kwargs:
+                    tool_calls = response.additional_kwargs["tool_calls"]
+                    if tool_calls and len(tool_calls) > 0:
+                        # Process ALL tool calls, then provide JSON tool messages back to the model
+                        client = await self.get_client()
 
-            return str(response.content)
+                        # Normalize tool calls to OpenAI current-format
+                        normalized_calls: list[dict] = []
+                        for idx, tc in enumerate(tool_calls):
+                            if tc.get("type") == "function" and "function" in tc:
+                                normalized_calls.append(tc)
+                            else:
+                                name = tc.get("function", {}).get(
+                                    "name", tc.get("name", "")
+                                )
+                                args_value = tc.get("function", {}).get(
+                                    "arguments", tc.get("arguments", {})
+                                )
+                                if not isinstance(args_value, str):
+                                    try:
+                                        args_value = json.dumps(args_value)
+                                    except Exception:
+                                        args_value = "{}"
+                                normalized_calls.append(
+                                    {
+                                        "id": tc.get("id", f"tool_call_{idx}"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": args_value,
+                                        },
+                                    }
+                                )
+
+                        # Resolve calls sequentially; capture results
+                        results = []
+                        for call in normalized_calls:
+                            fname = call.get("function", {}).get("name", "")
+                            try:
+                                res = await client.resolve_tool_call(
+                                    tool_call={
+                                        "name": fname,
+                                        "arguments": call.get("function", {}).get(
+                                            "arguments", "{}"
+                                        ),
+                                    },
+                                    session_id=session_id,
+                                    namespace=self._get_namespace(user_id),
+                                    user_id=user_id,
+                                )
+                            except Exception as e:
+                                logger.error(f"Tool '{fname}' failed: {e}")
+                                res = {"success": False, "error": str(e)}
+                            results.append((call, res))
+
+                        # Build assistant echo plus tool results as JSON content
+                        assistant_tools_msg = {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": normalized_calls,
+                        }
+
+                        tool_messages: list[dict] = []
+                        for i, (tc, res) in enumerate(results):
+                            if not res.get("success", False):
+                                logger.error(
+                                    f"Suppressing user-visible error for tool '{tc.get('function', {}).get('name', '')}': {res.get('error')}"
+                                )
+                                continue
+                            payload = res.get("result")
+                            try:
+                                content = (
+                                    json.dumps(payload)
+                                    if isinstance(payload, dict | list)
+                                    else str(res.get("formatted_response", ""))
+                                )
+                            except Exception:
+                                content = str(res.get("formatted_response", ""))
+                            tool_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.get("id", f"tool_call_{i}"),
+                                    "name": tc.get("function", {}).get("name", ""),
+                                    "content": content,
+                                }
+                            )
+
+                        # Give the model one follow-up round to chain further
+                        messages = (
+                            context_messages + [assistant_tools_msg] + tool_messages
+                        )
+                        followup = self.llm.invoke(messages)
+                        # Optional: one more round if tool_calls requested
+                        rounds = 0
+                        max_rounds = 1
+                        while (
+                            rounds < max_rounds
+                            and hasattr(followup, "tool_calls")
+                            and followup.tool_calls
+                        ):
+                            rounds += 1
+                            follow_calls = followup.tool_calls
+                            # Resolve
+                            follow_results = []
+                            for _j, fcall in enumerate(follow_calls):
+                                fname = fcall.get("name", "")
+                                try:
+                                    fres = await client.resolve_tool_call(
+                                        tool_call=fcall,
+                                        session_id=session_id,
+                                        namespace=self._get_namespace(user_id),
+                                        user_id=user_id,
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"Follow-up tool '{fname}' failed: {e}"
+                                    )
+                                    fres = {"success": False, "error": str(e)}
+                                follow_results.append((fcall, fres))
+                            # Echo
+                            norm_follow = []
+                            for idx2, fc in enumerate(follow_calls):
+                                if fc.get("type") == "function" and "function" in fc:
+                                    norm_follow.append(fc)
+                                else:
+                                    name = fc.get("name", "")
+                                    args_value = fc.get("arguments", fc.get("args", {}))
+                                    if not isinstance(args_value, str):
+                                        try:
+                                            args_value = json.dumps(args_value)
+                                        except Exception:
+                                            args_value = "{}"
+                                    norm_follow.append(
+                                        {
+                                            "id": fc.get(
+                                                "id", f"tool_call_follow_{idx2}"
+                                            ),
+                                            "type": "function",
+                                            "function": {
+                                                "name": name,
+                                                "arguments": args_value,
+                                            },
+                                        }
+                                    )
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": "",
+                                    "tool_calls": norm_follow,
+                                }
+                            )
+                            for k, (fc, fr) in enumerate(follow_results):
+                                if not fr.get("success", False):
+                                    logger.error(
+                                        f"Suppressing user-visible error for follow-up tool '{fc.get('name', '')}': {fr.get('error')}"
+                                    )
+                                    continue
+                                payload = fr.get("result")
+                                try:
+                                    content = (
+                                        json.dumps(payload)
+                                        if isinstance(payload, dict | list)
+                                        else str(fr.get("formatted_response", ""))
+                                    )
+                                except Exception:
+                                    content = str(fr.get("formatted_response", ""))
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": fc.get(
+                                            "id", f"tool_call_follow_{k}"
+                                        ),
+                                        "name": fc.get("function", {}).get(
+                                            "name", fc.get("name", "")
+                                        ),
+                                        "content": content,
+                                    }
+                                )
+                            followup = self.llm.invoke(messages)
+
+                        return str(followup.content)
+
+            response_content = str(response.content)
+
+            # Debug logging for empty responses
+            if not response_content or not response_content.strip():
+                logger.error("Empty response from LLM in main response generation")
+                logger.error(f"Response object: {response}")
+                logger.error(f"Response content: '{response.content}'")
+                logger.error(
+                    f"Response additional_kwargs: {getattr(response, 'additional_kwargs', {})}"
+                )
+                return "I apologize, but I couldn't generate a proper response to your request."
+
+            return response_content
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             return "I'm sorry, I encountered an error processing your request."
 
     async def process_user_input(
-        self, user_input: str, session_id: str, user_id: str
+        self,
+        user_input: str,
+        session_id: str,
+        user_id: str,
+        show_memories: bool = False,
     ) -> str:
         """Process user input and return assistant response."""
         try:
@@ -443,7 +703,15 @@ class TravelAgent:
                 session_id, user_id, "user", user_input
             )
 
-            response = await self._generate_response(session_id, user_id, user_input)
+            response = await self._generate_response(
+                session_id, user_id, user_input, show_memories
+            )
+
+            # Validate response before adding to working memory
+            if not response or not response.strip():
+                logger.error("Generated response is empty, using fallback message")
+                response = "I'm sorry, I encountered an error generating a response to your request."
+
             await self._add_message_to_working_memory(
                 session_id, user_id, "assistant", response
             )
@@ -483,9 +751,135 @@ class TravelAgent:
         finally:
             await self.cleanup()
 
+    async def run_demo_conversation(
+        self, session_id: str = "travel_demo", user_id: str = DEFAULT_USER
+    ):
+        """Run a demonstration conversation showing travel agent capabilities."""
+        print("✈️ Travel Agent Demo")
+        print("=" * 50)
+        print(
+            "This demo shows how the travel agent uses memory and web search capabilities."
+        )
+        print(
+            "Watch for 🧠 indicators showing retrieved memories from previous conversations."
+        )
+        print(f"Session ID: {session_id}, User ID: {user_id}")
+        print()
+
+        # First, create some background memories for the demo
+        print(
+            "🔧 Setting up demo by checking for existing background travel memories..."
+        )
+
+        client = await self.get_client()
+
+        # Check if we already have demo memories for this user
+        should_create_memories = True
+        try:
+            existing_memories = await client.search_long_term_memory(
+                text="Sarah",
+                namespace=Namespace(eq=self._get_namespace(user_id)),
+                user_id=UserId(eq=user_id),
+                limit=10,
+            )
+
+            if existing_memories and len(existing_memories.memories) >= 5:
+                print("✅ Found existing background travel memories about Sarah")
+                print()
+                should_create_memories = False
+        except Exception:
+            # Search failed, proceed with memory creation
+            pass
+
+        if should_create_memories:
+            print("🔧 Creating new background travel memories...")
+            from agent_memory_client.models import ClientMemoryRecord
+
+            # Create some background travel memories
+            demo_memories = [
+                ClientMemoryRecord(
+                    text="User Sarah loves beach destinations and prefers warm weather vacations",
+                    memory_type="semantic",
+                    topics=["travel", "preferences", "beaches"],
+                    entities=["Sarah", "beach", "warm weather"],
+                    namespace=self._get_namespace(user_id),
+                    user_id=user_id,
+                ),
+                ClientMemoryRecord(
+                    text="Sarah has a budget of $3000 for her next vacation and wants to travel in summer",
+                    memory_type="semantic",
+                    topics=["travel", "budget", "planning"],
+                    entities=["Sarah", "$3000", "summer", "vacation"],
+                    namespace=self._get_namespace(user_id),
+                    user_id=user_id,
+                ),
+                ClientMemoryRecord(
+                    text="Sarah visited Thailand last year and loved the food and culture there",
+                    memory_type="episodic",
+                    topics=["travel", "experience", "Thailand"],
+                    entities=["Sarah", "Thailand", "food", "culture"],
+                    namespace=self._get_namespace(user_id),
+                    user_id=user_id,
+                ),
+                ClientMemoryRecord(
+                    text="Sarah is interested in learning about local customs and trying authentic cuisine when traveling",
+                    memory_type="semantic",
+                    topics=["travel", "culture", "food"],
+                    entities=["Sarah", "local customs", "authentic cuisine"],
+                    namespace=self._get_namespace(user_id),
+                    user_id=user_id,
+                ),
+                ClientMemoryRecord(
+                    text="Sarah mentioned she's not a strong swimmer so prefers shallow water activities",
+                    memory_type="semantic",
+                    topics=["travel", "preferences", "activities"],
+                    entities=["Sarah", "swimming", "shallow water"],
+                    namespace=self._get_namespace(user_id),
+                    user_id=user_id,
+                ),
+            ]
+
+            await client.create_long_term_memory(demo_memories)
+            print("✅ Created background travel memories about Sarah")
+            print()
+
+        # Demo conversation scenarios
+        demo_inputs = [
+            "Hi! I'm thinking about planning a vacation this summer.",
+            "I'd like somewhere with beautiful beaches but not too expensive.",
+            "What do you remember about my travel preferences?",
+            "Can you suggest some destinations that would be good for someone like me?",
+            "I'm also interested in experiencing local culture and food.",
+            "What's the weather like in Bali during summer?",
+        ]
+
+        try:
+            for user_input in demo_inputs:
+                print(f"👤 User: {user_input}")
+                print(
+                    "🤔 Assistant is thinking... (checking memories and web if needed)"
+                )
+
+                response = await self.process_user_input(
+                    user_input, session_id, user_id, show_memories=True
+                )
+                print(f"🤖 Assistant: {response}")
+                print("-" * 70)
+                print()
+
+                # Add a small delay for better demo flow
+                await asyncio.sleep(1)
+
+        finally:
+            await self.cleanup()
+
     def run(self, session_id: str = "travel_session", user_id: str = DEFAULT_USER):
         """Synchronous wrapper for the async run method."""
         asyncio.run(self.run_async(session_id, user_id))
+
+    def run_demo(self, session_id: str = "travel_demo", user_id: str = DEFAULT_USER):
+        """Synchronous wrapper for the async demo method."""
+        asyncio.run(self.run_demo_conversation(session_id, user_id))
 
 
 def main():
@@ -502,6 +896,9 @@ def main():
     )
     parser.add_argument(
         "--redis-url", default="redis://localhost:6379", help="Redis URL for caching"
+    )
+    parser.add_argument(
+        "--demo", action="store_true", help="Run automated demo conversation"
     )
 
     args = parser.parse_args()
@@ -532,7 +929,14 @@ def main():
 
     try:
         agent = TravelAgent()
-        agent.run(session_id=args.session_id, user_id=args.user_id)
+
+        if args.demo:
+            # Run automated demo
+            agent.run_demo(session_id=args.session_id, user_id=args.user_id)
+        else:
+            # Run interactive session
+            agent.run(session_id=args.session_id, user_id=args.user_id)
+
     except KeyboardInterrupt:
         print("\nGoodbye!")
     except Exception as e:

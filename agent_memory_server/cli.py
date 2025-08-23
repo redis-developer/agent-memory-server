@@ -234,15 +234,42 @@ def task_worker(concurrency: int, redelivery_timeout: int):
         click.echo("Docket is disabled in settings. Cannot run worker.")
         sys.exit(1)
 
-    asyncio.run(
-        Worker.run(
+    async def _ensure_stream_and_group():
+        """Ensure the Docket stream and consumer group exist to avoid NOGROUP errors."""
+        from redis.exceptions import ResponseError
+
+        redis = await get_redis_conn()
+        stream_key = f"{settings.docket_name}:stream"
+        group_name = "docket-workers"
+
+        try:
+            # Create consumer group, auto-create stream if missing
+            await redis.xgroup_create(
+                name=stream_key, groupname=group_name, id="$", mkstream=True
+            )
+        except ResponseError as e:
+            # BUSYGROUP means it already exists; safe to ignore
+            if "BUSYGROUP" not in str(e).upper():
+                raise
+
+    async def _run_worker():
+        # Ensure Redis stream/consumer group and search index exist before starting worker
+        await _ensure_stream_and_group()
+        try:
+            redis = await get_redis_conn()
+            # Don't overwrite if an index already exists; just ensure it's present
+            await ensure_search_index_exists(redis, overwrite=False)
+        except Exception as e:
+            logger.warning(f"Failed to ensure search index exists: {e}")
+        await Worker.run(
             docket_name=settings.docket_name,
             url=settings.redis_url,
             concurrency=concurrency,
             redelivery_timeout=timedelta(seconds=redelivery_timeout),
             tasks=["agent_memory_server.docket_tasks:task_collection"],
         )
-    )
+
+    asyncio.run(_run_worker())
 
 
 @cli.group()

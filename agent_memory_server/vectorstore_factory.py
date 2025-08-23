@@ -189,7 +189,7 @@ def create_redis_vectorstore(embeddings: Embeddings) -> VectorStore:
             {"name": "persisted_at", "type": "numeric"},
             {"name": "event_date", "type": "numeric"},
             {"name": "extracted_from", "type": "tag"},
-            {"name": "id", "type": "tag"},
+            {"name": "id_", "type": "tag"},
         ]
 
         # Always use MemoryRedisVectorStore for consistency and to fix relevance score issues

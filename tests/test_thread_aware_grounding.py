@@ -79,7 +79,7 @@ class TestThreadAwareContextualGrounding:
 
         print(f"\nExtracted memories: {len(extracted_memories)}")
         for i, mem in enumerate(extracted_memories):
-            print(f"{i+1}. [{mem.memory_type}] {mem.text}")
+            print(f"{i + 1}. [{mem.memory_type}] {mem.text}")
 
         print(f"\nCombined memory text: {all_memory_text}")
 
@@ -200,7 +200,7 @@ class TestThreadAwareContextualGrounding:
 
         print(f"\nMulti-entity extracted memories: {len(extracted_memories)}")
         for i, mem in enumerate(extracted_memories):
-            print(f"{i+1}. [{mem.memory_type}] {mem.text}")
+            print(f"{i + 1}. [{mem.memory_type}] {mem.text}")
 
         # Should mention both John and Sarah by name
         assert "john" in all_memory_text.lower(), "Should mention John by name"

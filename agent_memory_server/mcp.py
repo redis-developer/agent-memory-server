@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import Any
 
 import ulid
@@ -6,10 +7,13 @@ from mcp.server.fastmcp import FastMCP as _FastMCPBase
 
 from agent_memory_server.api import (
     create_long_term_memory as core_create_long_term_memory,
+    delete_long_term_memory as core_delete_long_term_memory,
+    get_long_term_memory as core_get_long_term_memory,
     get_working_memory as core_get_working_memory,
     memory_prompt as core_memory_prompt,
     put_working_memory as core_put_working_memory,
     search_long_term_memory as core_search_long_term_memory,
+    update_long_term_memory as core_update_long_term_memory,
 )
 from agent_memory_server.config import settings
 from agent_memory_server.dependencies import get_background_tasks
@@ -26,12 +30,14 @@ from agent_memory_server.filters import (
 from agent_memory_server.models import (
     AckResponse,
     CreateMemoryRecordRequest,
+    EditMemoryRecordRequest,
     LenientMemoryRecord,
     MemoryMessage,
     MemoryPromptRequest,
     MemoryPromptResponse,
     MemoryRecord,
     MemoryRecordResults,
+    MemoryTypeEnum,
     ModelNameLiteral,
     SearchRequest,
     WorkingMemory,
@@ -41,6 +47,29 @@ from agent_memory_server.models import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_iso8601_datetime(event_date: str) -> datetime:
+    """
+    Parse ISO 8601 datetime string with robust handling of different timezone formats.
+
+    Args:
+        event_date: ISO 8601 formatted datetime string
+
+    Returns:
+        Parsed datetime object
+
+    Raises:
+        ValueError: If the datetime format is invalid
+    """
+    try:
+        # Handle 'Z' suffix (UTC indicator)
+        if event_date.endswith("Z"):
+            return datetime.fromisoformat(event_date.replace("Z", "+00:00"))
+        # Let fromisoformat handle other timezone formats like +05:00, -08:00, etc.
+        return datetime.fromisoformat(event_date)
+    except ValueError as e:
+        raise ValueError(f"Invalid ISO 8601 datetime format '{event_date}': {e}") from e
 
 
 class FastMCP(_FastMCPBase):
@@ -173,6 +202,33 @@ mcp_app = FastMCP(
 
 
 @mcp_app.tool()
+async def get_current_datetime() -> dict[str, str | int]:
+    """
+    Get the current datetime in UTC for grounding relative time expressions.
+
+    Use this tool whenever the user provides a relative time (e.g., "today",
+    "yesterday", "last week") or when you need to include a concrete date in
+    text. Always combine this with setting the structured `event_date` field on
+    episodic memories.
+
+    Returns:
+        - iso_utc: Current time in ISO 8601 format with Z suffix, e.g.,
+          "2025-08-14T23:59:59Z"
+        - unix_ts: Current Unix timestamp (seconds)
+
+    Example:
+        1. User: "I was promoted today"
+           - Call get_current_datetime → use `iso_utc` to set `event_date`
+           - Update text to include a grounded, human-readable date
+             (e.g., "User was promoted to Principal Engineer on August 14, 2025.")
+    """
+    now = datetime.utcnow()
+    # Produce a Z-suffixed ISO 8601 string
+    iso_utc = now.replace(microsecond=0).isoformat() + "Z"
+    return {"iso_utc": iso_utc, "unix_ts": int(now.timestamp())}
+
+
+@mcp_app.tool()
 async def create_long_term_memories(
     memories: list[LenientMemoryRecord],
 ) -> AckResponse:
@@ -185,8 +241,8 @@ async def create_long_term_memories(
     When creating memories, you MUST resolve all contextual references to their concrete referents:
 
     1. PRONOUNS: Replace ALL pronouns (he/she/they/him/her/them/his/hers/theirs) with actual person names
-       - "He prefers Python" → "John prefers Python" (if "he" refers to John)
-       - "Her expertise is valuable" → "Sarah's expertise is valuable" (if "her" refers to Sarah)
+       - "He prefers Python" → "User prefers Python" (if "he" refers to the user)
+       - "Her expertise is valuable" → "User's expertise is valuable" (if "her" refers to the user)
 
     2. TEMPORAL REFERENCES: Convert relative time expressions to absolute dates/times
        - "yesterday" → "2024-03-15" (if today is March 16, 2024)
@@ -824,3 +880,188 @@ async def get_working_memory(
     Get working memory for a session. This works like the GET /sessions/{id}/memory API endpoint.
     """
     return await core_get_working_memory(session_id=session_id)
+
+
+@mcp_app.tool()
+async def get_long_term_memory(
+    memory_id: str,
+) -> MemoryRecord:
+    """
+    Get a long-term memory by its ID.
+
+    This tool retrieves a specific long-term memory record using its unique identifier.
+
+    Args:
+        memory_id: The unique ID of the memory to retrieve
+
+    Returns:
+        The memory record if found
+
+    Raises:
+        Exception: If memory not found or long-term memory is disabled
+
+    Example:
+    ```python
+    get_long_term_memory(memory_id="01HXE2B1234567890ABCDEF")
+    ```
+    """
+    return await core_get_long_term_memory(memory_id=memory_id)
+
+
+@mcp_app.tool()
+async def edit_long_term_memory(
+    memory_id: str,
+    text: str | None = None,
+    topics: list[str] | None = None,
+    entities: list[str] | None = None,
+    memory_type: MemoryTypeEnum | None = None,
+    namespace: str | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    event_date: str | None = None,
+) -> MemoryRecord:
+    """
+    Edit an existing long-term memory by its ID.
+
+    This tool allows you to update specific fields of a long-term memory record.
+    Only the fields you provide will be updated; other fields remain unchanged.
+
+    IMPORTANT: Use this tool whenever you need to update existing memories based on new information
+    or corrections provided by the user. This is essential for maintaining accurate memory records.
+
+    Args:
+        memory_id: The unique ID of the memory to edit (required)
+        text: Updated text content for the memory
+        topics: Updated list of topics for the memory
+        entities: Updated list of entities mentioned in the memory
+        memory_type: Updated memory type ("semantic", "episodic", or "message")
+        namespace: Updated namespace for organizing the memory
+        user_id: Updated user ID associated with the memory
+        session_id: Updated session ID where the memory originated
+        event_date: Updated event date for episodic memories (ISO 8601 format: "2024-01-15T14:30:00Z")
+
+    Returns:
+        The updated memory record
+
+    Raises:
+        Exception: If memory not found, invalid fields, or long-term memory is disabled
+
+    IMPORTANT DATE HANDLING RULES:
+    - For time-bound updates (episodic), ALWAYS set `event_date`.
+    - When users provide relative dates ("today", "yesterday", "last week"),
+      call `get_current_datetime` to resolve the current date/time, then set
+      `event_date` using the ISO value and include a grounded, human-readable
+      date in the `text` (e.g., "on August 14, 2025").
+    - Do not guess dates; if unsure, ask or omit the date phrase in `text`.
+
+    COMMON USAGE PATTERNS:
+
+    1. Update memory text content:
+    ```python
+    edit_long_term_memory(
+        memory_id="01HXE2B1234567890ABCDEF",
+        text="User prefers dark mode UI (updated preference)"
+    )
+    ```
+
+    2. Update memory type and add event date:
+    ```python
+    edit_long_term_memory(
+        memory_id="01HXE2B1234567890ABCDEF",
+        memory_type="episodic",
+        event_date="2024-01-15T14:30:00Z"
+    )
+    ```
+
+    2b. Include grounded date in text AND set event_date:
+    ```python
+    # After resolving relative time with get_current_datetime
+    edit_long_term_memory(
+        memory_id="01HXE2B1234567890ABCDEF",
+        text="User was promoted to Principal Engineer on January 15, 2024.",
+        memory_type="episodic",
+        event_date="2024-01-15T14:30:00Z"
+    )
+    ```
+
+    3. Update topics and entities:
+    ```python
+    edit_long_term_memory(
+        memory_id="01HXE2B1234567890ABCDEF",
+        topics=["preferences", "ui", "accessibility"],
+        entities=["dark_mode", "user_interface"]
+    )
+    ```
+
+    4. Update multiple fields at once:
+    ```python
+    edit_long_term_memory(
+        memory_id="01HXE2B1234567890ABCDEF",
+        text="User completed Python certification course",
+        memory_type="episodic",
+        event_date="2024-01-10T00:00:00Z",
+        topics=["education", "achievement", "python"],
+        entities=["Python", "certification"]
+    )
+    ```
+
+    5. Move memory to different namespace or user:
+    ```python
+    edit_long_term_memory(
+        memory_id="01HXE2B1234567890ABCDEF",
+        namespace="work_projects",
+        user_id="user_456"
+    )
+    ```
+    """
+    # Build the update request dictionary, handling event_date parsing
+    update_dict = {
+        "text": text,
+        "topics": topics,
+        "entities": entities,
+        "memory_type": memory_type,
+        "namespace": namespace,
+        "user_id": user_id,
+        "session_id": session_id,
+        "event_date": (
+            _parse_iso8601_datetime(event_date) if event_date is not None else None
+        ),
+    }
+
+    # Filter out None values to only include fields that should be updated
+    update_dict = {k: v for k, v in update_dict.items() if v is not None}
+    updates = EditMemoryRecordRequest(**update_dict)
+
+    return await core_update_long_term_memory(memory_id=memory_id, updates=updates)
+
+
+@mcp_app.tool()
+async def delete_long_term_memories(
+    memory_ids: list[str],
+) -> AckResponse:
+    """
+    Delete long-term memories by their IDs.
+
+    This tool permanently removes specified long-term memory records.
+    Use with caution as this action cannot be undone.
+
+    Args:
+        memory_ids: List of memory IDs to delete
+
+    Returns:
+        Acknowledgment response with the count of deleted memories
+
+    Raises:
+        Exception: If long-term memory is disabled or deletion fails
+
+    Example:
+    ```python
+    delete_long_term_memories(
+        memory_ids=["01HXE2B1234567890ABCDEF", "01HXE2B9876543210FEDCBA"]
+    )
+    ```
+    """
+    if not settings.long_term_memory:
+        raise ValueError("Long-term memory is disabled")
+
+    return await core_delete_long_term_memory(memory_ids=memory_ids)

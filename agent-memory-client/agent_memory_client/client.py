@@ -517,11 +517,16 @@ class MemoryAPIClient:
             print(f"Stored memories: {response.status}")
             ```
         """
-        # Apply default namespace if needed
+        # Apply default namespace and ensure IDs are present
         if self.config.default_namespace is not None:
             for memory in memories:
                 if memory.namespace is None:
                     memory.namespace = self.config.default_namespace
+
+        # Ensure all memories have IDs
+        for memory in memories:
+            if not memory.id:
+                memory.id = str(ULID())
 
         payload = {
             "memories": [m.model_dump(exclude_none=True, mode="json") for m in memories]
@@ -557,6 +562,54 @@ class MemoryAPIClient:
             )
             response.raise_for_status()
             return AckResponse(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
+
+    async def get_long_term_memory(self, memory_id: str) -> MemoryRecord:
+        """
+        Get a specific long-term memory by its ID.
+
+        Args:
+            memory_id: The unique ID of the memory to retrieve
+
+        Returns:
+            MemoryRecord object containing the memory details
+
+        Raises:
+            MemoryClientException: If memory not found or request fails
+        """
+        try:
+            response = await self._client.get(f"/v1/long-term-memory/{memory_id}")
+            response.raise_for_status()
+            return MemoryRecord(**response.json())
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e.response)
+            raise
+
+    async def edit_long_term_memory(
+        self, memory_id: str, updates: dict[str, Any]
+    ) -> MemoryRecord:
+        """
+        Edit an existing long-term memory by its ID.
+
+        Args:
+            memory_id: The unique ID of the memory to edit
+            updates: Dictionary of fields to update (text, topics, entities, memory_type, etc.)
+
+        Returns:
+            MemoryRecord object containing the updated memory
+
+        Raises:
+            MemoryClientException: If memory not found or update fails
+        """
+        try:
+            response = await self._client.patch(
+                f"/v1/long-term-memory/{memory_id}",
+                json=updates,
+            )
+            response.raise_for_status()
+            return MemoryRecord(**response.json())
         except httpx.HTTPStatusError as e:
             self._handle_http_error(e.response)
             raise
@@ -728,7 +781,8 @@ class MemoryAPIClient:
         topics: Sequence[str] | None = None,
         entities: Sequence[str] | None = None,
         memory_type: str | None = None,
-        max_results: int = 5,
+        max_results: int = 10,
+        offset: int = 0,
         min_relevance: float | None = None,
         user_id: str | None = None,
         optimize_query: bool = False,
@@ -746,7 +800,8 @@ class MemoryAPIClient:
             topics: Optional list of topic strings to filter by
             entities: Optional list of entity strings to filter by
             memory_type: Optional memory type ("episodic", "semantic", "message")
-            max_results: Maximum results to return (default: 5)
+            max_results: Maximum results to return (default: 10)
+            offset: Offset for pagination (default: 0)
             min_relevance: Optional minimum relevance score (0.0-1.0)
             user_id: Optional user ID to filter memories by
             optimize_query: Whether to optimize the query for vector search (default: False - LLMs typically provide already optimized queries)
@@ -761,6 +816,7 @@ class MemoryAPIClient:
                 query="user preferences about UI themes",
                 topics=["preferences", "ui"],
                 max_results=3,
+                offset=2,
                 min_relevance=0.7
             )
 
@@ -800,15 +856,17 @@ class MemoryAPIClient:
             memory_type=memory_type_filter,
             distance_threshold=distance_threshold,
             limit=max_results,
+            offset=offset,
             user_id=user_id_filter,
             optimize_query=optimize_query,
         )
 
-        # Format for LLM consumption
+        # Format for LLM consumption (include IDs so follow-up tools can act)
         formatted_memories = []
         for memory in results.memories:
             formatted_memories.append(
                 {
+                    "id": getattr(memory, "id", None),
                     "text": memory.text,
                     "memory_type": memory.memory_type,
                     "topics": memory.topics or [],
@@ -822,9 +880,17 @@ class MemoryAPIClient:
                 }
             )
 
+        has_more = (results.next_offset is not None) or (
+            results.total > (offset + len(results.memories))
+        )
         return {
             "memories": formatted_memories,
             "total_found": results.total,
+            "offset": offset,
+            "next_offset": results.next_offset
+            if results.next_offset is not None
+            else (offset + len(formatted_memories) if has_more else None),
+            "has_more": has_more,
             "query": query,
             "summary": f"Found {len(formatted_memories)} relevant memories for: {query}",
         }
@@ -871,7 +937,7 @@ class MemoryAPIClient:
             "type": "function",
             "function": {
                 "name": "search_memory",
-                "description": "Search long-term memory for relevant information using a query for vector search. Use this when you need to recall past conversations, user preferences, or previously stored information. Note: This searches only long-term memory, not current working memory.",
+                "description": "Search long-term memory for relevant information using semantic vector search. Use this when you need to find previously stored information about the user, such as their preferences, past conversations, or important facts. Examples: 'Find information about user food preferences', 'What did they say about their job?', 'Look for travel preferences'. This searches only long-term memory, not current working memory - use get_working_memory for current session info. IMPORTANT: The result includes 'memories' with an 'id' field; use these IDs when calling edit_long_term_memory or delete_long_term_memories.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -898,8 +964,14 @@ class MemoryAPIClient:
                             "type": "integer",
                             "minimum": 1,
                             "maximum": 20,
-                            "default": 5,
+                            "default": 10,
                             "description": "Maximum number of results to return",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "Offset for pagination (default: 0)",
                         },
                         "min_relevance": {
                             "type": "number",
@@ -1156,7 +1228,7 @@ class MemoryAPIClient:
             "type": "function",
             "function": {
                 "name": "get_working_memory",
-                "description": "Get the current working memory state including messages, stored memories, and session data. Use this to understand what information is already stored in the current session.",
+                "description": "Get the current working memory state including recent messages, temporarily stored memories, and session-specific data. Use this to check what's already in the current conversation context before deciding whether to search long-term memory or add new information. Examples: Check if user preferences are already loaded in this session, review recent conversation context, see what structured data has been stored for this session.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -1177,7 +1249,12 @@ class MemoryAPIClient:
             "type": "function",
             "function": {
                 "name": "add_memory_to_working_memory",
-                "description": "Add important information as a structured memory to working memory. Use this to store user preferences, trip details, requirements, or other important facts that should be remembered. The memory server will automatically promote important memories to long-term storage.",
+                "description": (
+                    "Store new important information as a structured memory. Use this when users share preferences, facts, or important details that should be remembered for future conversations. "
+                    "Examples: 'User is vegetarian', 'Lives in Seattle', 'Works as a software engineer', 'Prefers morning meetings'. The system automatically promotes important memories to long-term storage. "
+                    "For time-bound (episodic) information, include a grounded date phrase in the text (e.g., 'on August 14, 2025') and call get_current_datetime to resolve relative expressions like 'today'/'yesterday'; the backend will set the structured event_date during extraction/promotion. "
+                    "Always check if similar information already exists before creating new memories."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1218,7 +1295,7 @@ class MemoryAPIClient:
             "type": "function",
             "function": {
                 "name": "update_working_memory_data",
-                "description": "Update or add structured data to working memory. Use this to store session-specific information like current trip plans, preferences, or other structured data that should persist in the session.",
+                "description": "Store or update structured session data (JSON objects) in working memory. Use this for complex session-specific information that needs to be accessed and modified during the conversation. Examples: Travel itinerary {'destination': 'Paris', 'dates': ['2024-03-15', '2024-03-20']}, project details {'name': 'Website Redesign', 'deadline': '2024-04-01', 'status': 'in_progress'}. Different from add_memory_to_working_memory which stores simple text facts.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1234,6 +1311,125 @@ class MemoryAPIClient:
                         },
                     },
                     "required": ["data"],
+                },
+            },
+        }
+
+    @classmethod
+    def get_long_term_memory_tool_schema(cls) -> dict[str, Any]:
+        """
+        Get OpenAI-compatible tool schema for retrieving a long-term memory by ID.
+
+        Returns:
+            Tool schema dictionary compatible with OpenAI tool calling format
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": "get_long_term_memory",
+                "description": "Retrieve a specific long-term memory by its unique ID to see full details. Use this when you have a memory ID from search_memory results and need complete information before editing or to show detailed memory content to the user. Example: After search_memory('job information') returns memories with IDs, call get_long_term_memory(memory_id=<ID>) to inspect before editing. Always obtain the memory_id from search_memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "string",
+                            "description": "The unique ID of the memory to retrieve",
+                        },
+                    },
+                    "required": ["memory_id"],
+                },
+            },
+        }
+
+    @classmethod
+    def edit_long_term_memory_tool_schema(cls) -> dict[str, Any]:
+        """
+        Get OpenAI-compatible tool schema for editing a long-term memory.
+
+        Returns:
+            Tool schema dictionary compatible with OpenAI tool calling format
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": "edit_long_term_memory",
+                "description": (
+                    "Update an existing long-term memory with new or corrected information. Use this when users provide corrections ('Actually, I work at Microsoft, not Google'), updates ('I got promoted to Senior Engineer'), or additional details. Only specify the fields you want to change - other fields remain unchanged. "
+                    "Examples: Update job title from 'Engineer' to 'Senior Engineer', change location from 'New York' to 'Seattle', correct food preference from 'coffee' to 'tea'. "
+                    "For time-bound (episodic) updates, ALWAYS set event_date (ISO 8601 UTC) and include a grounded, human-readable date in the text. Use get_current_datetime to resolve 'today'/'yesterday'/'last week' before setting event_date. "
+                    "IMPORTANT: First call search_memory to get candidate memories; then pass the chosen memory's 'id' as memory_id."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "string",
+                            "description": "The unique ID of the memory to edit (required)",
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Updated text content for the memory",
+                        },
+                        "topics": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Updated list of topics for the memory",
+                        },
+                        "entities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Updated list of entities mentioned in the memory",
+                        },
+                        "memory_type": {
+                            "type": "string",
+                            "enum": ["episodic", "semantic", "message"],
+                            "description": "Updated memory type: 'episodic' (events/experiences), 'semantic' (facts/preferences), 'message' (conversation snippets)",
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Updated namespace for organizing the memory",
+                        },
+                        "user_id": {
+                            "type": "string",
+                            "description": "Updated user ID associated with the memory",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Updated session ID where the memory originated",
+                        },
+                        "event_date": {
+                            "type": "string",
+                            "description": "Updated event date for episodic memories (ISO 8601 format: '2024-01-15T14:30:00Z')",
+                        },
+                    },
+                    "required": ["memory_id"],
+                },
+            },
+        }
+
+    @classmethod
+    def delete_long_term_memories_tool_schema(cls) -> dict[str, Any]:
+        """
+        Get OpenAI-compatible tool schema for deleting long-term memories.
+
+        Returns:
+            Tool schema dictionary compatible with OpenAI tool calling format
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": "delete_long_term_memories",
+                "description": "Permanently delete long-term memories that are outdated, incorrect, or no longer needed. Use this when users explicitly request information removal ('Delete that old job information'), when you find duplicate memories that should be consolidated, or when memories contain outdated information that might confuse future conversations. Examples: Remove old job info after user changes careers, delete duplicate food preferences, remove outdated contact information. IMPORTANT: First call search_memory to get candidate memories; then pass the selected memories' 'id' values as memory_ids. This action cannot be undone.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "memory_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of memory IDs to delete",
+                        },
+                    },
+                    "required": ["memory_ids"],
                 },
             },
         }
@@ -1264,6 +1460,10 @@ class MemoryAPIClient:
             cls.get_working_memory_tool_schema(),
             cls.get_add_memory_tool_schema(),
             cls.get_update_memory_data_tool_schema(),
+            cls.get_long_term_memory_tool_schema(),
+            cls.edit_long_term_memory_tool_schema(),
+            cls.delete_long_term_memories_tool_schema(),
+            cls.get_current_datetime_tool_schema(),
         ]
 
     @classmethod
@@ -1292,7 +1492,34 @@ class MemoryAPIClient:
             cls.get_working_memory_tool_schema_anthropic(),
             cls.get_add_memory_tool_schema_anthropic(),
             cls.get_update_memory_data_tool_schema_anthropic(),
+            cls.get_long_term_memory_tool_schema_anthropic(),
+            cls.edit_long_term_memory_tool_schema_anthropic(),
+            cls.delete_long_term_memories_tool_schema_anthropic(),
+            cls.get_current_datetime_tool_schema_anthropic(),
         ]
+
+    @classmethod
+    def get_current_datetime_tool_schema(cls) -> dict[str, Any]:
+        """OpenAI-compatible tool schema for current UTC datetime."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "get_current_datetime",
+                "description": (
+                    "Return the current datetime in UTC to ground relative time expressions. "
+                    "Use this before setting `event_date` or including a human-readable date in text when the user says "
+                    "'today', 'yesterday', 'last week', etc."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        }
+
+    @classmethod
+    def get_current_datetime_tool_schema_anthropic(cls) -> dict[str, Any]:
+        """Anthropic-compatible tool schema for current UTC datetime."""
+        return cls._convert_openai_to_anthropic_schema(
+            cls.get_current_datetime_tool_schema()
+        )
 
     @classmethod
     def get_memory_search_tool_schema_anthropic(cls) -> dict[str, Any]:
@@ -1316,6 +1543,24 @@ class MemoryAPIClient:
     def get_update_memory_data_tool_schema_anthropic(cls) -> dict[str, Any]:
         """Get update memory data tool schema in Anthropic format."""
         openai_schema = cls.get_update_memory_data_tool_schema()
+        return cls._convert_openai_to_anthropic_schema(openai_schema)
+
+    @classmethod
+    def get_long_term_memory_tool_schema_anthropic(cls) -> dict[str, Any]:
+        """Get long-term memory tool schema in Anthropic format."""
+        openai_schema = cls.get_long_term_memory_tool_schema()
+        return cls._convert_openai_to_anthropic_schema(openai_schema)
+
+    @classmethod
+    def edit_long_term_memory_tool_schema_anthropic(cls) -> dict[str, Any]:
+        """Get edit long-term memory tool schema in Anthropic format."""
+        openai_schema = cls.edit_long_term_memory_tool_schema()
+        return cls._convert_openai_to_anthropic_schema(openai_schema)
+
+    @classmethod
+    def delete_long_term_memories_tool_schema_anthropic(cls) -> dict[str, Any]:
+        """Get delete long-term memories tool schema in Anthropic format."""
+        openai_schema = cls.delete_long_term_memories_tool_schema()
         return cls._convert_openai_to_anthropic_schema(openai_schema)
 
     @staticmethod
@@ -1467,6 +1712,15 @@ class MemoryAPIClient:
         # Detect OpenAI legacy function call format
         elif "name" in tool_call and "arguments" in tool_call:
             return MemoryAPIClient.parse_openai_function_call(tool_call)
+
+        # Detect LangChain format (uses 'args' instead of 'arguments')
+        elif "name" in tool_call and "args" in tool_call:
+            return UnifiedToolCall(
+                id=tool_call.get("id"),
+                name=tool_call.get("name", ""),
+                arguments=tool_call.get("args", {}),
+                provider="generic",
+            )
 
         # Generic format - assume it's already in a usable format
         else:
@@ -1667,6 +1921,18 @@ class MemoryAPIClient:
                     args, session_id, effective_namespace, user_id
                 )
 
+            elif function_name == "get_long_term_memory":
+                result = await self._resolve_get_long_term_memory(args)
+
+            elif function_name == "edit_long_term_memory":
+                result = await self._resolve_edit_long_term_memory(args)
+
+            elif function_name == "delete_long_term_memories":
+                result = await self._resolve_delete_long_term_memories(args)
+
+            elif function_name == "get_current_datetime":
+                result = await self._resolve_get_current_datetime()
+
             else:
                 return ToolCallResolutionResult(
                     success=False,
@@ -1777,6 +2043,81 @@ class MemoryAPIClient:
             namespace=namespace,
             user_id=user_id,
         )
+
+    async def _resolve_get_long_term_memory(
+        self, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resolve get_long_term_memory function call."""
+        memory_id = args.get("memory_id")
+        if not memory_id:
+            raise ValueError(
+                "memory_id parameter is required for getting long-term memory"
+            )
+
+        result = await self.get_long_term_memory(memory_id=memory_id)
+        return {"memory": result}
+
+    async def _resolve_edit_long_term_memory(
+        self, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resolve edit_long_term_memory function call."""
+        memory_id = args.get("memory_id")
+        if not memory_id:
+            raise ValueError(
+                "memory_id parameter is required for editing long-term memory"
+            )
+
+        # Extract all possible update fields
+        updates = {}
+        for field in [
+            "text",
+            "topics",
+            "entities",
+            "memory_type",
+            "namespace",
+            "user_id",
+            "session_id",
+            "event_date",
+        ]:
+            if field in args:
+                updates[field] = args[field]
+
+        if not updates:
+            raise ValueError("At least one field to update must be provided")
+
+        result = await self.edit_long_term_memory(memory_id=memory_id, updates=updates)
+        return {"memory": result}
+
+    async def _resolve_delete_long_term_memories(
+        self, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resolve delete_long_term_memories function call."""
+        memory_ids = args.get("memory_ids")
+        if not memory_ids:
+            raise ValueError(
+                "memory_ids parameter is required for deleting long-term memories"
+            )
+
+        if not isinstance(memory_ids, list):
+            raise ValueError("memory_ids must be a list of memory IDs")
+
+        result = await self.delete_long_term_memories(memory_ids=memory_ids)
+        # Handle both dict-like and model responses
+        try:
+            status = getattr(result, "status", None)
+        except Exception:
+            status = None
+        if not status:
+            status = "Deleted memories successfully"
+        return {"status": status}
+
+    async def _resolve_get_current_datetime(self) -> dict[str, Any]:
+        """Resolve get_current_datetime function call (client-side fallback)."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        iso_utc = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return {"iso_utc": iso_utc, "unix_ts": int(now.timestamp())}
 
     async def resolve_function_calls(
         self,
@@ -2214,7 +2555,7 @@ class MemoryAPIClient:
                 session_id="current_session",
                 long_term_search={
                     "topics": {"any": ["preferences", "ui"]},
-                    "limit": 5
+                    "limit": 10
                 }
             )
 
@@ -2289,6 +2630,7 @@ class MemoryAPIClient:
         distance_threshold: float | None = None,
         memory_type: dict[str, Any] | None = None,
         limit: int = 10,
+        offset: int = 0,
         optimize_query: bool = True,
     ) -> dict[str, Any]:
         """
@@ -2309,13 +2651,14 @@ class MemoryAPIClient:
             distance_threshold: Optional distance threshold
             memory_type: Optional memory type filter (as dict)
             limit: Maximum number of long-term memories to include
+            offset: Offset for pagination (default: 0)
             optimize_query: Whether to optimize the query for vector search using a fast model (default: True)
 
         Returns:
             Dict with messages hydrated with relevant long-term memories
         """
         # Build long-term search parameters
-        long_term_search: dict[str, Any] = {"limit": limit}
+        long_term_search: dict[str, Any] = {"limit": limit, "offset": offset}
 
         if session_id is not None:
             long_term_search["session_id"] = session_id
